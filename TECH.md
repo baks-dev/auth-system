@@ -216,6 +216,17 @@
 - `name`: required, min 1 character
 
 **Success Response (201):**
+
+```bash
+curl -X POST https://api.mystore.com/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "SecurePass123",
+    "name": "Иван Иванов"
+  }'
+```
+
 ```json
 {
   "message": "Registration successful. Please check your email to verify your account.",
@@ -270,6 +281,16 @@
 ```
 
 **Success Response (200):**
+
+```bash
+curl -X POST https://api.mystore.com/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "SecurePass123"
+  }'
+```
+
 ```json
 {
   "access_token": "eyJhbG...",
@@ -295,6 +316,12 @@ Refresh-Token: eyJhbG...
 ```
 
 **Success Response (200):**
+
+```bash
+curl -X POST https://api.mystore.com/v1/auth/refresh \
+  -H "Refresh-Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
 ```json
 {
   "access_token": "eyJhbG...",
@@ -341,6 +368,12 @@ Authorization: Bearer eyJhbG...
 ```
 
 **Success Response (200):**
+
+```bash
+curl https://api.mystore.com/v1/auth/me \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
