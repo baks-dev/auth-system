@@ -242,7 +242,7 @@
 - При получении 401 с `X-Token-Status: expired` выполнить refresh token flow
 - При `X-Token-Refresh: true` можно продолжить работу (token обновлен прозрачно)
 
-### 2.2 Refresh Token
+### 2.4 Refresh Token
 
 **Header:**
 ```json
@@ -265,7 +265,8 @@
 
 **Срок жизни:** 7 дней  
 **Хранение:** HTTP-only cookie (домен: `api.mystore.com`)  
-**Одноразовость:** После использования инвалидируется в БД и Redis  
+**Token Binding:** Refresh token привязан к `ip_address` и `user_agent_hash` (проверяются при валидации)  
+**Rotation:** При каждом refresh генерируется новый refresh token, старый инвалидируется (одноразовость)  
 **Revocation:** `jti` добавляется в Redis blacklist с TTL = оставшееся время жизни
 
 ---
@@ -339,6 +340,7 @@
 | revoked | BOOLEAN | DEFAULT false |
 | revoked_at | TIMESTAMP | NULL |
 | expires_at | TIMESTAMP | NOT NULL |
+| parent_token_id | UUID | REFERENCES refresh_tokens(id) NULL (для отслеживания rotation) |
 | created_at | TIMESTAMP | DEFAULT NOW() |
 
 **Описание полей:**
@@ -350,12 +352,14 @@
 - `revoked` — флаг инвалидации (true после logout или компрометации)
 - `revoked_at` — время инвалидации токена (NULL если активен)
 - `expires_at` — время истечения токена (7 дней от создания)
+- `parent_token_id` — ссылка на родительский токен при rotation (NULL для исходного токена)
 - `created_at` — время выдачи токена
 
-**Revocation Flow:**
-1. При logout: `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ?`
-2. При проверке refresh: `WHERE jti = ? AND revoked = FALSE AND expires_at > NOW()`
-3. Очистка: удаление revoked токенов старше N дней (cron-задача)
+**Revocation Flow (с token binding):**
+1. При logout: `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ? AND user_id = ?`
+2. При проверке refresh: `WHERE jti = ? AND revoked = FALSE AND expires_at > NOW() AND ip_address = ? AND user_agent_hash = ?`
+3. Token rotation: при каждом refresh генерируется новый токен с `parent_token_id`, старый помечается как revoked
+4. Очистка: удаление revoked токенов старше N дней (cron-задача)
 
 **Индексы:**
 - `idx_refresh_token` (token) — для быстрого поиска (по хэшу)
@@ -439,16 +443,10 @@
 | `lock:forgot-password:{email}` | String | Блокировка после неудачного сброса | 1 час |
 | `user_agent:hash:{hash}` | String | Метаинформация по хэшу user_agent (browser/os/device) | 30 дней |
 
-**Redis Commands used:**
-- `INCR` / `EXPIRE` — счетчики rate limiting
-- `HSET` / `HGET` — хранение session data
-- `SET` / `GET` / `GETSET` — флаги revoked tokens и access jti
-- `DEL` — удаление истекших записей
-
-**Revocation Flow:**
-1. При logout: `SET revoked_tokens:{refresh_token_hash} 1 EX 604800`
-2. При истечении access token: проверка `GET revoked_access_jti:{jti}`
-3. При refresh: инвалидация старого refresh token + создание нового с новым jti
+**Redis Keys:**
+- `session:{refresh_token_hash}` — информация о сессии (user_id, created_at, jti, ip_address, user_agent_hash)
+- `revoked_tokens:{refresh_token_hash}` — флаг инвалидации токена
+- `revoked_access_jti:{jti}` — флаг инвалидации access token по jti
 
 **Redis Commands used:**
 - `INCR` / `EXPIRE` — счетчики rate limiting
@@ -457,9 +455,12 @@
 - `DEL` — удаление истекших записей
 
 **Revocation Flow:**
-1. При logout: `SET revoked_tokens:{refresh_token_hash} 1 EX 604800`
+1. При logout: `SET revoked_tokens:{refresh_token_hash} 1 EX 604800` + обновление revoked в БД
 2. При истечении access token: проверка `GET revoked_access_jti:{jti}`
-3. При refresh: инвалидация старого refresh token + создание нового с новым jti
+3. При refresh:
+   - Валидация старого refresh token (включая проверку ip_address и user_agent_hash)
+   - Инвалидация старого refresh token (revoked в БД + Redis blacklist)
+   - Создание нового refresh token с новым jti и сохранением parent_token_id
 
 ---
 
@@ -512,9 +513,9 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 {
   "error": "validation_failed",
   "details": {
-    "email": "Неверный формат email",
-    "password": "Пароль должен содержать минимум 8 символов",
-    "name": "Имя не может быть пустым"
+    "email": "Invalid email format",
+    "password": "Password must contain at least 8 characters",
+    "name": "Name cannot be empty"
   }
 }
 ```
@@ -523,7 +524,7 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 ```json
 {
   "error": "email_exists",
-  "message": "Пользователь с таким email уже зарегистрирован",
+  "message": "A user with this email already exists",
   "details": {}
 }
 ```
@@ -532,7 +533,7 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 ```json
 {
   "error": "rate_limited",
-  "message": "Превышен лимит запросов",
+  "message": "Request limit exceeded",
   "details": { "retry_after": 3600 }
 }
 ```
@@ -564,12 +565,20 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 - `400`: Invalid or expired token
 - `409`: Email already verified
 
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/verify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "abc123xyz"
+  }'
+```
 
 **Response 400 Bad Request:**
 ```json
 {
   "error": "invalid_token",
-  "message": "Неверный или просроченный токен подтверждения",
+  "message": "Invalid or expired verification token",
   "details": {}
 }
 ```
@@ -618,7 +627,7 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 ```json
 {
   "error": "invalid_credentials",
-  "message": "Неверный email или пароль"
+  "message": "Invalid email or password"
 }
 ```
 
@@ -626,7 +635,7 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 ```json
 {
   "error": "email_not_confirmed",
-  "message": "Пожалуйста, подтвердите email перед входом"
+  "message": "Please verify your email before logging in"
 }
 ```
 
@@ -634,7 +643,7 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 ```json
 {
   "error": "rate_limited",
-  "message": "Превышен лимит запросов",
+  "message": "Request limit exceeded",
   "details": { "retry_after": 3600 }
 }
 ```
@@ -643,14 +652,19 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 
 ### 4.4 POST /v1/auth/refresh
 
-**Описание:** Получение нового access token
+**Описание:** Получение нового access token с rotation refresh token
 
 **Headers:**
 ```
-Authorization: Bearer eyJhbG...
+Authorization: Bearer eyJhbG...   // Access token для идентификации сессии
 ```
 
 **Refresh Token Location:** HTTP-only cookie (`refreshToken`)
+
+**Поведение:**
+- Refresh token **не передается в Authorization header** — он автоматически отправляется браузером как HTTP-only cookie
+- Access token передается в `Authorization: Bearer <token>` для идентификации сессии
+- При успешном refresh генерируется **новый refresh token** и устанавливается как cookie (старый инвалидируется)
 
 **Success Response (200):**
 
@@ -662,7 +676,6 @@ curl -X POST https://api.mystore.com/v1/auth/refresh \
 ```json
 {
   "access_token": "eyJhbG...",
-  "refresh_token": "eyJhbG...",
   "token_type": "bearer",
   "expires_in": 1800
 }
@@ -677,7 +690,7 @@ curl -X POST https://api.mystore.com/v1/auth/refresh \
 ```json
 {
   "error": "rate_limited",
-  "message": "Превышен лимит запросов",
+  "message": "Request limit exceeded",
   "details": { "retry_after": 3600 }
 }
 ```
@@ -704,11 +717,17 @@ Authorization: Bearer eyJhbG...
 **Error Responses:**
 - `401`: Invalid access token
 
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/logout \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
 **Response 401 Unauthorized:**
 ```json
 {
   "error": "invalid_token",
-  "message": "Неверный или просроченный access token"
+  "message": "Invalid or expired access token"
 }
 ```
 
@@ -748,7 +767,7 @@ curl https://api.mystore.com/v1/auth/me \
 ```json
 {
   "error": "invalid_token",
-  "message": "Неверный или просроченный access token"
+  "message": "Invalid or expired access token"
 }
 ```
 
@@ -776,6 +795,15 @@ curl https://api.mystore.com/v1/auth/me \
 - `409`: Email already verified
 - `429`: Rate limited
 
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/resend-verification \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com"
+  }'
+```
+
 **Behavior for already verified email:** Возвращает `200 OK` с сообщением `{"message": "Email already verified"}` (идемпотентное поведение)
 
 ---
@@ -796,6 +824,15 @@ curl https://api.mystore.com/v1/auth/me \
 {
   "message": "Password reset instructions sent to your email."
 }
+```
+
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com"
+  }'
 ```
 
 **Behavior:** Не раскрывает существование email (для безопасности). Возвращает `200 OK` для любых запросов (существующих и несуществующих email).
@@ -824,6 +861,16 @@ curl https://api.mystore.com/v1/auth/me \
 }
 ```
 
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "reset-token-from-email",
+    "password": "NewSecurePass123"
+  }'
+```
+
 ---
 
 ### 4.10 POST /v1/auth/unsubscribe
@@ -842,6 +889,15 @@ curl https://api.mystore.com/v1/auth/me \
 {
   "message": "Successfully unsubscribed from newsletter"
 }
+```
+
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/unsubscribe \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "unsubscribe-token-from-email"
+  }'
 ```
 
 **Error Responses:**
@@ -874,6 +930,17 @@ Authorization: Bearer eyJhbG...
 }
 ```
 
+**Example Request:**
+```bash
+curl -X PUT https://api.mystore.com/v1/auth/change-password \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "current_password": "OldPass123",
+    "new_password": "NewSecurePass456"
+  }'
+```
+
 ---
 
 ## 5. Security Implementation
@@ -891,11 +958,12 @@ Authorization: Bearer eyJhbG...
 | `/reset-password` | 5 | 1 час | 1 час | При успешном сбросе |
 | `/refresh` | 30 | 10 мин | — | Без блокировки |
 | `/change-password` | 5 | 1 час | 1 час | При успешной смене |
+| `/logout` | 30 | 10 мин | — | Без блокировки |
 
 **Algorithm:**
 1. На каждую неудачную попытку логируем IP + email
 2. Если за период лимита превышено количество запросов → 429
-3. Для `/login` и `/register`: после 5 неудачных попыток включается блокировка
+3. Для `/login`, `/register`, `/logout`: после 5 неудачных попыток включается блокировка
    - 5 неудачных → блокировка 15 минут
    - 10 неудачных → блокировка 24 часа
 
@@ -905,6 +973,11 @@ Authorization: Bearer eyJhbG...
 - **TTL:** Period + 5 минут (автоматическая очистка)
 - **Counter:** INCR/EXPIRE для каждого identifier
 - **Block key:** `lock:{endpoint}:{identifier}` с TTL = duration
+
+**Logout Rate Limiting:**
+- Ключ: `rate_limit:logout:{ip}`
+- TTL: 15 минут (10 мин + 5 мин)
+- Logout защищен от DoS через лимит 30 запросов в 10 минут по IP
 
 **Timing Attack Protection:**
 - Использовать константное сравнение для всех критичных проверок:
@@ -923,7 +996,7 @@ Authorization: Bearer eyJhbG...
 ### 5.3 Token Security
 
 **Refresh Token Revocation:**
-- При logout токен **помечается как revoked в БД** (`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW()`)
+- При logout токен **помечается как revoked в БД** (`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ? AND user_id = ?`)
 - Одновременно `jti` токена добавляется в Redis blacklist с TTL = оставшееся время жизни
 - **Токен НЕ удаляется из БД** (для аудита и предотвращения reuse)
 - Очистка revoked токенов: периодический cron-джоб удаления токенов, revoked = TRUE и expired более N дней назад
@@ -931,7 +1004,15 @@ Authorization: Bearer eyJhbG...
 **Refresh Token Structure:**
 - `revoked` (BOOLEAN, default FALSE) — флаг инвалидации
 - `revoked_at` (TIMESTAMP, NULL) — время инвалидации
-- При проверке refresh token: `WHERE jti = ? AND revoked = FALSE AND expires_at > NOW()`
+- `parent_token_id` (UUID) — ссылка на родительский токен при rotation
+
+**Token Binding:**
+- При проверке refresh token проверяются:
+  - `jti` валидность
+  - `revoked = FALSE`
+  - `expires_at > NOW()`
+  - **`ip_address` совпадает с IP запроса**
+  - **`user_agent_hash` совпадает с хэшем User-Agent запроса**
 
 **Access Token:**
 - RS256, 30 минут, хранение в памяти
@@ -940,10 +1021,14 @@ Authorization: Bearer eyJhbG...
 - Авто-обновление при истечении (только safe methods)
 - При logout: `revoked_access_jti:{jti}` добавляется в Redis с TTL=30 минут
 
-**Refresh Token:**
+**Refresh Token Rotation:**
 - RS256, 7 дней, HTTP-only cookie + Redis blacklist
-- После использования инвалидируется в БД и Redis
-- Single-use refresh: токен инвалидируется после использования
+- **При каждом refresh:**
+  1. Старый refresh token инвалидируется (revoked в БД + Redis blacklist)
+  2. Генерируется новый refresh token с новым jti
+  3. Новый токен сохраняется с `parent_token_id`, указывающим на старый токен
+  4. Новый токен устанавливается как HTTP-only cookie
+- Single-use refresh: токен инвалидируется после использования (реализован через rotation)
 
 **Timing Attack Protection:**
 - Использовать константное сравнение для всех критичных проверок:
@@ -999,6 +1084,7 @@ if (!allowedOrigins.includes(origin)) {
 |--------|-----------|
 | Brute force атака | Rate limiting (Redis), блокировка по IP/email, timing-safe comparison |
 | Token stealing | HTTP-only cookies, short-lived access tokens, refresh token rotation, revocation tracking |
+| Token binding attack | IP + User-Agent binding для refresh tokens, проверка при каждом использовании |
 | SQL Injection | Prepared statements (ORM), parameterized queries |
 | XSS | Content-Security-Policy, sanitize user input, HTTP headers |
 | CSRF | SameSite=Strict cookies, Origin/Referer validation, CSRF tokens для чувствительных операций |
@@ -1008,6 +1094,7 @@ if (!allowedOrigins.includes(origin)) {
 | Token reuse | Refresh token инвалидируется после использования, revoked флаг в БД + Redis blacklist |
 | Account enumeration | Ответы не раскрывают наличие email, timing-safe comparison при verify/login |
 | Session hijacking | Short-lived access tokens, HTTP-only cookies, Origin validation |
+| Logout DoS | Rate limiting (30/10min по IP) для logout endpoint |
 
 ---
 
@@ -1027,10 +1114,10 @@ if (!allowedOrigins.includes(origin)) {
 - [ ] SameSite=Strict для всех cookie
 - [ ] Secure флаг для cookie (только HTTPS в production)
 - [ ] HTTP-only флаг для refresh token cookie
-- [ ] Rate limiting для всех endpoints (Redis)
+- [ ] Rate limiting для всех endpoints (Redis), включая logout (30/10min по IP)
 - [ ] Блокировка аккаунтов после превышения лимита неудач
-- [ ] Revocation flow для logout (UPDATE revoked + Redis blacklist)
-- [ ] Проверка revoked флага при refresh
+- [ ] Revocation flow для logout (UPDATE revoked + Redis blacklist + проверка user_id)
+- [ ] Проверка revoked флага, ip_address и user_agent_hash при refresh
 - [ ] Очистка старых revoked токенов (cron-задача)
 - [ ] Генерация unsubscribe_token при регистрации пользователя
 - [ ] Endpoint POST /v1/auth/unsubscribe для обработки отписок
@@ -1289,9 +1376,11 @@ LOG_LEVEL=info
 ## 10. Testing Strategy
 
 ### Unit Tests
+- Целевое покрытие: **≥85%** для критических модулей (auth, token handling, password hashing)
+- Целевое покрытие: **≥70%** для остальных модулей
 - Хэширование паролей (argon2id)
 - Подпись/проверка JWT (RS256)
-- Генерация токенов электронной почты 
+- Генерация токенов электронной почты
 - Ограничение запросов / Rate limiting
 - **JWT ID (jti) генерация и уникальность**
 - **Revocation check по jti в Redis**
@@ -1305,7 +1394,17 @@ LOG_LEVEL=info
 - Ограничение запросов / Rate limiting
 - **Auto-refresh access token при истечении (safe methods)**
 - **Revocation по jti (logout и истечение срока)**
+- **Edge case: Refresh token истек в момент запроса refresh**
+- **Edge case: Access token истек в момент refresh (должен вернуть 401)**
+- **Edge case: Использованный refresh token (reuse attack)**
 
 ### E2E Tests
-- сценарии используя фреймворки для E2E тестирования (Cypress/Playwright)
+- Фреймворки: Cypress / Playwright
 - Проверка UI (если есть)
+- **Security Scenarios:**
+  - **XSS: Ввод вредоносного JS в поля name/email/password, проверка экранирования**
+  - **SQLi: Injection в email (e.g. `' OR 1=1 --`)**
+  - **Header injection в User-Agent**
+  - **CSRF: Проверка отсутствия токена в заголовках**
+  - **Token leakage: Проверка, что токены не попадают в console.log и network logs**
+  - **Session fixation: Проверка смены jti при refresh**
