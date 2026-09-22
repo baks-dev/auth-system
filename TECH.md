@@ -197,7 +197,7 @@
 **Header:**
 ```json
 {
-  "alg": "HS256",
+  "alg": "RS256",
   "typ": "JWT"
 }
 ```
@@ -205,26 +205,68 @@
 **Payload:**
 ```json
 {
+  "jti": "uuid-v7",           // JWT ID (unique identifier for token tracking)
   "sub": "uuid-v7",           // user ID (time-based)
   "email": "user@example.com",
   "name": "Иван Иванов",
   "role": "user",             // "user" | "admin"
   "is_email_verified": true,
+  "auth_time": 1726989600,    // authentication time (unix timestamp)
   "iat": 1726989600,          // issued at (unix timestamp)
   "exp": 1726991400           // expires at (unix timestamp)
 }
 ```
 
 **Срок жизни:** 30 минут  
-**Секрет:** Хранится в переменной окружения `JWT_ACCESS_SECRET`  
-**Алгоритм:** HS256
+**Алгоритм:** RS256  
+**Ключ:** Приватный ключ хранится в переменной окружения `JWT_PRIVATE_KEY` (PEM format)  
+**Верификация:** Публичный ключ доступен через `/.well-known/jwks.json` или из `JWT_PUBLIC_KEY`
+
+### 2.3 Обработка истекших Access Tokens
+
+**Стратегия:** Token refresh при истечении в середине запроса
+
+| Время до exp | Действие | Ответ |
+|--------------|----------|-------|
+| `exp - now > 5s` | Обычный запрос | 200 OK |
+| `exp - now <= 5s` | Авто-обновление (только safe methods) | 200 OK + `X-Token-Refresh: true` header |
+| `exp - now < 0` (просрочен) | Требуется refresh | 401 Unauthorized + `X-Token-Status: expired` |
+
+**Правила:**
+- **Safe methods (GET, HEAD, OPTIONS):** Автоматически обновляют access token через refresh, если истек менее 5 секунд назад
+- **Unsafe methods (POST, PUT, DELETE):** Возвращают 401 без авто-обновления
+- **Header:** При авто-обновлении добавляется `X-Token-Refresh: true` для информирования клиента
+- **Логирование:** Все авто-обновления логируются с `event: "token.autorefresh"`
+
+**Рекомендация для клиентов:**
+- При получении 401 с `X-Token-Status: expired` выполнить refresh token flow
+- При `X-Token-Refresh: true` можно продолжить работу (token обновлен прозрачно)
 
 ### 2.2 Refresh Token
 
-**Payload аналогичен Access Token**  
+**Header:**
+```json
+{
+  "alg": "RS256",
+  "typ": "JWT"
+}
+```
+
+**Payload:**
+```json
+{
+  "jti": "uuid-v7",           // JWT ID (unique identifier for revocation tracking)
+  "sub": "uuid-v7",           // user ID
+  "email": "user@example.com",
+  "iat": 1726989600,          // issued at (unix timestamp)
+  "exp": 1727076000           // expires at (unix timestamp, 7 days)
+}
+```
+
 **Срок жизни:** 7 дней  
 **Хранение:** HTTP-only cookie (домен: `api.mystore.com`)  
-**Одноразовость:** После использования инвалидируется в БД
+**Одноразовость:** После использования инвалидируется в БД и Redis  
+**Revocation:** `jti` добавляется в Redis blacklist с TTL = оставшееся время жизни
 
 ---
 
@@ -344,15 +386,21 @@
 | `rate_limit:register:{ip}:{day}` | String | Счетчик регистраций по IP | 24 часа |
 | `rate_limit:verify:{ip}:{day}` | String | Счетчик верификаций по IP | 24 часа |
 | `rate_limit:refresh:{ip}:{minute}` | String | Счетчик refresh запросов по IP | 15 минут |
-| `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at) | 7 дней |
+| `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at, jti) | 7 дней |
 | `revoked_tokens:{refresh_token_hash}` | String | Флаг инвалидации токена | 7 дней |
+| `revoked_access_jti:{jti}` | String | Флаг инвалидации access token по jti | 30 минут |
 | `lock:login:{email}` | String | Блокировка аккаунта после неудач | 15-24 часа |
 
 **Redis Commands used:**
 - `INCR` / `EXPIRE` — счетчики rate limiting
 - `HSET` / `HGET` — хранение session data
-- `SET` / `GET` — флаги revoked tokens
+- `SET` / `GET` / `GETSET` — флаги revoked tokens и access jti
 - `DEL` — удаление истекших записей
+
+**Revocation Flow:**
+1. При logout: `SET revoked_tokens:{refresh_token_hash} 1 EX 604800`
+2. При истечении access token: проверка `GET revoked_access_jti:{jti}`
+3. При refresh: инвалидация старого refresh token + создание нового с новым jti
 
 ---
 
@@ -767,10 +815,17 @@ Authorization: Bearer eyJhbG...
 
 ### 5.3 Token Security
 
-- **Access Token:** HS256, 30 минут, хранение в памяти
-- **Refresh Token:** HS256, 7 дней, HTTP-only cookie + Redis blacklist
+- **Access Token:** RS256, 30 минут, хранение в памяти
+  - Каждый токен имеет уникальный `jti` (UUIDv7)
+  - `jti` хранится в Redis с TTL=30 минут для отслеживания
+  - Авто-обновление при истечении (только safe methods)
+- **Refresh Token:** RS256, 7 дней, HTTP-only cookie + Redis blacklist
+  - Каждый токен имеет уникальный `jti` (UUIDv7)
+  - После использования инвалидируется в БД и Redis
+  - `jti` добавляется в Redis blacklist с TTL = оставшееся время жизни
 - **Single-use refresh:** Токен инвалидируется после использования
 - **Revocation:** При logout токен добавляется в Redis blacklist
+- **JWT ID tracking:** `revoked_access_jti:{jti}` в Redis для предотвращения повторного использования
 
 ### 5.4 Email Security
 
@@ -923,12 +978,16 @@ EMAIL_QUEUE_PREFIX=emails
 ```json
 {
   "timestamp": "2024-09-22T10:30:00.000Z",
-  "event": "user.registered" | "user.verified" | "user.logged_in" | "user.logged_out" | "auth.failed",
+  "event": "user.registered" | "user.verified" | "user.logged_in" | "user.logged_out" | "auth.failed" | "token.autorefresh",
   "user_id": "01a0c637-3aa0-73d4-b85e-8f89aa81e711",
   "email": "user@example.com",
   "ip_address": "192.168.1.1",
   "user_agent": "Mozilla/5.0...",
-  "details": {}
+  "details": {
+    "jti": "01hv...",      // JWT ID (для token.autorefresh)
+    "request_method": "GET",
+    "path": "/api/users"
+  }
 }
 ```
 
@@ -938,6 +997,7 @@ EMAIL_QUEUE_PREFIX=emails
 - `user.verified` — логировать user_id
 - `user.logged_in` — логировать user_id и IP
 - `user.logged_out` — логировать user_id
+- `token.autorefresh` — логировать jti, метод запроса и путь (при авто-обновлении access token)
 
 ---
 
@@ -947,8 +1007,8 @@ EMAIL_QUEUE_PREFIX=emails
 |------------|--------------|----------|
 | `NODE_ENV` | Да | development, staging, production |
 | `PORT` | Да | Порт сервера (по умолчанию: 3000) |
-| `JWT_ACCESS_SECRET` | Да | Секрет для access tokens (минимум 32 байта) |
-| `JWT_REFRESH_SECRET` | Да | Секрет для refresh tokens (минимум 32 байта) |
+| `JWT_PRIVATE_KEY` | Да | Приватный ключ для RS256 (PEM format, base64-encoded) |
+| `JWT_PUBLIC_KEY` | Да | Публичный ключ для верификации RS256 (PEM format, base64-encoded) |
 | `DATABASE_URL` | Да | PostgreSQL connection string |
 | `REDIS_URL` | Да | Redis connection string (включая пароль, если есть) |
 | `SMTP_HOST` | Да | SMTP сервер |
@@ -969,8 +1029,8 @@ EMAIL_QUEUE_PREFIX=emails
 NODE_ENV=production
 PORT=3000
 
-JWT_ACCESS_SECRET=your-super-secret-access-key-min-32-bytes
-JWT_REFRESH_SECRET=your-super-secret-refresh-key-min-32-bytes
+JWT_PRIVATE_KEY=LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUV2Z0lCQURBTkJna3Foa2lHOXcwQkFRRUZBQVNDQktjd2dnU2pBZ0VBQW9JQkFRREZuWk1QeGNuQlBZ...
+JWT_PUBLIC_KEY=LS0tLS1CRUdJTiBQVUJMSWMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUXNGQUFCQ0NBU0N3Z2dFa01BMEdDU3FHU0liM0RRRUIvVUFNQlR4UXdIeV...
 
 DATABASE_URL=postgresql://user:pass@localhost:5432/auth_db?ssl=true
 
@@ -1019,9 +1079,11 @@ LOG_LEVEL=info
 
 ### Unit Tests
 - Хэширование паролей (argon2id)
-- Подпись/проверка JWT
+- Подпись/проверка JWT (RS256)
 - Генерация токенов электронной почты 
 - Ограничение запросов / Rate limiting
+- **JWT ID (jti) генерация и уникальность**
+- **Revocation check по jti в Redis**
 
 ### Интеграционные тесты
 - Полный процесс регистрации / registration
@@ -1030,6 +1092,8 @@ LOG_LEVEL=info
 - Обновления токена / Token refresh
 - Процесс выхода из системы / logout
 - Ограничение запросов / Rate limiting
+- **Auto-refresh access token при истечении (safe methods)**
+- **Revocation по jti (logout и истечение срока)**
 
 ### E2E Tests
 - сценарии используя фреймворки для E2E тестирования (Cypress/Playwright)
