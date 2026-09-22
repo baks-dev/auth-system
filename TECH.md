@@ -283,6 +283,7 @@
 | role | VARCHAR(20) | DEFAULT 'user' |
 | is_email_verified | BOOLEAN | DEFAULT false |
 | email_verified_at | TIMESTAMP | NULL |
+| unsubscribe_token | VARCHAR(255) | UNIQUE, NULL (для отписки от рассылки) |
 | created_at | TIMESTAMP | DEFAULT NOW() |
 | updated_at | TIMESTAMP | DEFAULT NOW() |
 
@@ -300,6 +301,7 @@
 **Индексы:**
 - `idx_users_email` (email) — для быстрого поиска при login/registration
 - `idx_users_role` (role) — для фильтрации по ролям
+- `idx_users_unsubscribe_token` (unsubscribe_token) — для быстрой отписки
 
 ### 3.2 email_verification_tokens
 
@@ -356,7 +358,31 @@
 - `idx_refresh_user_id` (user_id) — для поиска активных токенов
 - `idx_refresh_expires_at` (expires_at) — для очистки истекших токенов
 
-### 3.4 login_attempts
+### 3.4 reset_password_tokens
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| id | UUID | PRIMARY KEY |
+| user_id | UUID | REFERENCES users(id) ON DELETE CASCADE |
+| token | VARCHAR(255) | UNIQUE, NOT NULL (UUIDv7) |
+| expires_at | TIMESTAMP | NOT NULL (1 час от создания) |
+| created_at | TIMESTAMP | DEFAULT NOW() |
+| used_at | TIMESTAMP | NULL |
+
+**Описание полей:**
+- `id` — уникальный идентификатор токена (UUID v7)
+- `user_id` — референс на пользователя, каскадное удаление
+- `token` — UUIDv7 для сброса пароля, одноразовый
+- `expires_at` — время истечения токена (1 час от создания)
+- `created_at` — время генерации токена
+- `used_at` — время использования токена (после reset, NULL если не использован)
+
+**Индексы:**
+- `idx_reset_token` (token) — для быстрого поиска
+- `idx_reset_user_id` (user_id) — для поиска активных токенов
+- `idx_reset_expires_at` (expires_at) — для очистки истекших токенов
+
+### 3.5 login_attempts
 
 | Поле | Тип | Описание |
 |------|-----|----------|
@@ -790,7 +816,31 @@ curl https://api.mystore.com/v1/auth/me \
 
 ---
 
-### 4.10 PUT /v1/auth/change-password
+### 4.10 POST /v1/auth/unsubscribe
+
+**Описание:** Отписка от коммерческой рассылки (GDPR/КоАП)
+
+**Request Body:**
+```json
+{
+  "token": "unsubscribe-token-from-email"
+}
+```
+
+**Success Response (200):**
+```json
+{
+  "message": "Successfully unsubscribed from newsletter"
+}
+```
+
+**Error Responses:**
+- `400`: Invalid or expired token
+- `404`: User not found
+
+---
+
+### 4.11 PUT /v1/auth/change-password
 
 **Описание:** Изменение пароля
 
@@ -894,10 +944,11 @@ Authorization: Bearer eyJhbG...
 
 ### 5.4 Email Security
 
-- **Verification tokens:** URL-safe base64 UUID, 24 часа
-- **Reset tokens:** UUIDv7, 1 час
-- **Forgot-password tokens:** UUIDv7, 1 час
-- **Tokens одноразовые:** После использования помечаются как использованные в БД
+- **Verification tokens:** URL-safe base64 UUID, TTL = 24 часа (см. 3.2 email_verification_tokens)
+- **Reset tokens:** UUIDv7, TTL = 1 час (см. 3.4 reset_password_tokens)
+- **Forgot-password tokens:** UUIDv7, TTL = 1 час
+- **Unsubscribe tokens:** UUIDv7, хранятся в users.unsubscribe_token, не истекают
+- **Tokens одноразовые:** После использования помечаются как использованные в БД (used_at)
 - **No email enumeration:** Ответы не раскрывают наличие email
 - **Timing-safe comparison:** Обязательное константное сравнение токенов при verify/reset
 
@@ -971,6 +1022,8 @@ if (!allowedOrigins.includes(origin)) {
 - [ ] Revocation flow для logout (UPDATE revoked + Redis blacklist)
 - [ ] Проверка revoked флага при refresh
 - [ ] Очистка старых revoked токенов (cron-задача)
+- [ ] Генерация unsubscribe_token при регистрации пользователя
+- [ ] Endpoint POST /v1/auth/unsubscribe для обработки отписок
 
 ---
 
@@ -1016,12 +1069,18 @@ https://mystore.com/verify?token={token}
 
 Ссылка действует 24 часа.
 
+--- 
+Управление рассылкой:
+Если вы больше не хотите получать письма от MyStore, отпишитесь:
+https://mystore.com/unsubscribe?token={unsubscribe_token}
+
 Если вы не регистрировались в MyStore, проигнорируйте это письмо.
 ```
 
 **Template variables:**
 - `{name}` — имя пользователя
-- `{token}` — email verification token
+- `{token}` — email verification token (для GET-страницы verify)
+- `{unsubscribe_token}` — токен для отписки от рассылки (UUIDv7 из users.unsubscribe_token)
 - `{company}` — название компании (MyStore)
 
 ### 6.3 Template: Password Reset
@@ -1037,12 +1096,18 @@ https://mystore.com/reset-password?token={token}
 
 Ссылка действует 1 час.
 
+--- 
+Управление рассылкой:
+Если вы больше не хотите получать письма от MyStore, отпишитесь:
+https://mystore.com/unsubscribe?token={unsubscribe_token}
+
 Если вы не запрашивали сброс пароля, проигнорируйте это письмо.
 ```
 
 **Template variables:**
 - `{email}` — email пользователя
-- `{token}` — password reset token
+- `{token}` — password reset token (для GET-страницы reset-password)
+- `{unsubscribe_token}` — токен для отписки от рассылки (UUIDv7 из users.unsubscribe_token)
 - `{company}` — название компании
 
 ### 6.4 Email Queue (для высокой нагрузки)
@@ -1054,6 +1119,7 @@ https://mystore.com/reset-password?token={token}
 **Job types:**
 - `verification` — email verification
 - `password_reset` — password reset
+- `unsubscribe` — handling unsubscribe requests
 - `notification` — general notifications
 
 **Worker configuration:**
@@ -1077,8 +1143,10 @@ SMTP_PASS=***
 SMTP_FROM=noreply@mystore.com
 
 # Email URLs (для ссылок в письмах)
-EMAIL_VERIFY_URL=https://mystore.com/verify
-PASSWORD_RESET_URL=https://mystore.com/reset-password
+APP_URL=https://mystore.com
+APP_VERIFY_URL=https://mystore.com/verify
+APP_RESET_PASSWORD_URL=https://mystore.com/reset-password
+APP_UNSUBSCRIBE_URL=https://mystore.com/unsubscribe
 
 # Email Queue (BullMQ)
 REDIS_URL=redis://localhost:6379
@@ -1135,6 +1203,9 @@ EMAIL_QUEUE_PREFIX=emails
 | `SMTP_TIMEOUT` | Нет | Таймаут SMTP соединения (по умолчанию: 30s) |
 | `SMTP_TLS_MIN_VERSION` | Нет | Минимальная версия TLS (по умолчанию: TLSv1.2) |
 | `APP_URL` | Да | URL приложения (для email ссылок) |
+| `APP_VERIFY_URL` | Нет | URL страницы верификации (по умолчанию: APP_URL/verify) |
+| `APP_RESET_PASSWORD_URL` | Нет | URL страницы сброса пароля (по умолчанию: APP_URL/reset-password) |
+| `APP_UNSUBSCRIBE_URL` | Нет | URL страницы отписки (по умолчанию: APP_URL/unsubscribe) |
 | `RATE_LIMIT_WINDOW_MS` | Нет | Окно rate limiting в мс (по умолчанию: 60000) |
 | `RATE_LIMIT_MAX` | Нет | Максимальное кол-во запросов (по умолчанию: 100) |
 | `LOG_LEVEL` | Нет | debug, info, warn, error (по умолчанию: info) |
@@ -1160,6 +1231,9 @@ SMTP_FROM=noreply@mystore.com
 SMTP_TIMEOUT=30000
 
 APP_URL=https://mystore.com
+APP_VERIFY_URL=https://mystore.com/verify
+APP_RESET_PASSWORD_URL=https://mystore.com/reset-password
+APP_UNSUBSCRIBE_URL=https://mystore.com/unsubscribe
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX=100
 
