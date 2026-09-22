@@ -19,7 +19,7 @@
        │
 ┌──────▼────────────────────────────────────┐
 │             API Gateway / Load Balancer   │
-│             - Rate limiting               │
+│             - Rate limiting (Redis)       │
 │             - SSL termination             │
 └──────┬────────────────────────────────────┘
        │
@@ -39,18 +39,153 @@
 │  │  - JWT generation/verification      │  │
 │  │  - Password hashing (argon2id)      │  │
 │  │  - Token management                 │  │
+│  │  - Redis client (rate limiting)     │  │
+│  │  - SMTP client (email sending)      │  │
 │  └─────────────────────────────────────┘  │
 └──────┬────────────────────────────────────┘
        │
-       │ PostgreSQL
-       │
-┌──────▼────────────────────────────────────┐
-│              Database Layer               │
-│  - users                                  │
-│  - email_verification_tokens              │
-│  - refresh_tokens                         │
-│  - login_attempts                         │
-└───────────────────────────────────────────┘
+       │ PostgreSQL                  Redis               SMTP Server
+       │                 │            │                  │
+┌──────▼────────────────▼────────────▼──────────────────▼────┐
+│                   Data Layer                               │
+│  ┌──────────────┐  ┌─────────────┐  ┌──────────────────┐  │
+│  │  users       │  │  rate_limits│  │  Email Queue     │  │
+│  │  tokens      │  │  sessions   │  │  SMTP Client     │  │
+│  │  login_attempts│ │  locks      │  │  Templates       │  │
+│  └──────────────┘  └─────────────┘  └──────────────────┘  │
+└────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 1.1 Диаграмма потоков данных
+
+### Регистрация пользователя
+
+```
+┌──────────┐    1. POST /register    ┌──────────────────┐
+│  Client  │ ──────────────────────> │   API Gateway    │
+└──────────┘                         └────────┬─────────┘
+                                               │
+                         2. Rate limit check   │
+                                         ┌─────▼───────┐
+                                         │   Redis       │
+                                         │   (check)     │
+                                         └───────────────┘
+                                               │
+                3. Validate & Hash password    │
+                                    ┌──────────▼──────────┐
+                                    │   Auth Service      │
+                                    │   - Validate input  │
+                                    │   - Argon2id hash   │
+                                    └──────────┬──────────┘
+                                               │
+                      4. Store user + token    │
+                                    ┌──────────▼──────────┐
+                                    │   PostgreSQL        │
+                                    │   - users table     │
+                                    │   - tokens table    │
+                                    └──────────┬──────────┘
+                                               │
+                 5. Send verification email    │
+                                    ┌──────────▼──────────┐
+                                    │   SMTP Client       │
+                                    │   - Email template  │
+                                    │   - Queue delivery  │
+                                    └─────────────────────┘
+                                               │
+                     6. Return success         │
+                                    ┌──────────▼──────────┐
+                                    │   Client response   │
+                                    └─────────────────────┘
+```
+
+### Аутентификация (Login)
+
+```
+┌──────────┐    1. POST /login       ┌──────────────────┐
+│  Client  │ ──────────────────────> │   API Gateway    │
+└──────────┘                         └────────┬─────────┘
+                                               │
+                         2. Rate limit check   │
+                                    ┌──────────▼──────────┐
+                                    │   Redis             │
+                                    │   - IP counter      │
+                                    └─────────────────────┘
+                                               │
+              3. Find user + verify password   │
+                                    ┌──────────▼──────────┐
+                                    │   Auth Service      │
+                                    │   - DB query        │
+                                    │   - Argon2id check  │
+                                    └──────────┬──────────┘
+                                               │
+               4. Generate tokens + store      │
+                                    ┌──────────▼──────────┐
+                                    │   Redis             │
+                                    │   - Store session   │
+                                    └─────────────────────┘
+                                               │
+                    5. Return tokens           │
+                                    ┌──────────▼──────────┐
+                                    │   Client response   │
+                                    └─────────────────────┘
+```
+
+### Refresh токена
+
+```
+┌──────────┐    1. POST /refresh     ┌──────────────────┐
+│  Client  │ ──────────────────────> │   API Gateway    │
+└──────────┘                         └────────┬─────────┘
+                                               │
+                         2. Rate limit check   │
+                                    ┌──────────▼──────────┐
+                                    │   Redis             │
+                                    └─────────────────────┘
+                                               │
+            3. Validate refresh token          │
+                                    ┌──────────▼──────────┐
+                                    │   Auth Service      │
+                                    │   - Check Redis     │
+                                    │   - Check DB        │
+                                    └──────────┬──────────┘
+                                               │
+        4. Invalidate old + Generate new       │
+                                    ┌──────────▼──────────┐
+                                    │   Redis             │
+                                    │   - Store new       │
+                                    └─────────────────────┘
+                                               │
+                  5. Return new tokens         │
+                                    ┌──────────▼──────────┐
+                                    │   Client response   │
+                                    └─────────────────────┘
+```
+
+### Logout
+
+```
+┌──────────┐    1. POST /logout      ┌──────────────────┐
+│  Client  │ ──────────────────────> │   API Gateway    │
+└──────────┘                         └────────┬─────────┘
+                                               │
+                         2. Rate limit check   │
+                                    ┌──────────▼──────────┐
+                                    │   Redis             │
+                                    └─────────────────────┘
+                                               │
+          3. Revoke refresh token              │
+                                    ┌──────────▼──────────┐
+                                    │   Auth Service      │
+                                    │   - Mark revoked    │
+                                    │   - Store in Redis  │
+                                    └──────────┬──────────┘
+                                               │
+                  4. Return success            │
+                                    ┌──────────▼──────────┐
+                                    │   Client response   │
+                                    └─────────────────────┘
 ```
 
 ---
@@ -201,6 +336,26 @@
 
 ---
 
+### 3.5 Redis Keys (для rate limiting и session management)
+
+| Ключ | Тип | Описание | TTL |
+|------|-----|----------|-----|
+| `rate_limit:login:{ip}:{hour}` | String | Счетчик неудачных логинов по IP | 1 час |
+| `rate_limit:register:{ip}:{day}` | String | Счетчик регистраций по IP | 24 часа |
+| `rate_limit:verify:{ip}:{day}` | String | Счетчик верификаций по IP | 24 часа |
+| `rate_limit:refresh:{ip}:{minute}` | String | Счетчик refresh запросов по IP | 15 минут |
+| `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at) | 7 дней |
+| `revoked_tokens:{refresh_token_hash}` | String | Флаг инвалидации токена | 7 дней |
+| `lock:login:{email}` | String | Блокировка аккаунта после неудач | 15-24 часа |
+
+**Redis Commands used:**
+- `INCR` / `EXPIRE` — счетчики rate limiting
+- `HSET` / `HGET` — хранение session data
+- `SET` / `GET` — флаги revoked tokens
+- `DEL` — удаление истекших записей
+
+---
+
 ## 4. Endpoints
 
 ### 4.1 POST /v1/auth/register
@@ -245,6 +400,36 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 - `409`: Email already registered
 - `429`: Rate limited
 
+**Response 400 Bad Request:**
+```json
+{
+  "error": "validation_failed",
+  "details": {
+    "email": "Неверный формат email",
+    "password": "Пароль должен содержать минимум 8 символов",
+    "name": "Имя не может быть пустым"
+  }
+}
+```
+
+**Response 409 Conflict:**
+```json
+{
+  "error": "email_exists",
+  "message": "Пользователь с таким email уже зарегистрирован",
+  "details": {}
+}
+```
+
+**Response 429 Too Many Requests:**
+```json
+{
+  "error": "rate_limited",
+  "message": "Превышен лимит запросов",
+  "details": { "retry_after": 3600 }
+}
+```
+
 ---
 
 ### 4.2 POST /v1/auth/verify
@@ -271,6 +456,16 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 **Error Responses:**
 - `400`: Invalid or expired token
 - `409`: Email already verified
+
+
+**Response 400 Bad Request:**
+```json
+{
+  "error": "invalid_token",
+  "message": "Неверный или просроченный токен подтверждения",
+  "details": {}
+}
+```
 
 ---
 
@@ -307,8 +502,35 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 ```
 
 **Error Responses:**
-- `401`: Invalid credentials or unverified email
+- `401`: Invalid credentials email
+- `403`: Email not confirmed 
 - `429`: Rate limited
+
+
+**Response 401 Unauthorized:**
+```json
+{
+  "error": "invalid_credentials",
+  "message": "Неверный email или пароль"
+}
+```
+
+**Response 403 Forbidden:**
+```json
+{
+  "error": "email_not_confirmed",
+  "message": "Пожалуйста, подтвердите email перед входом"
+}
+```
+
+**Response 429 Too Many Requests:**
+```json
+{
+  "error": "rate_limited",
+  "message": "Превышен лимит запросов",
+  "details": { "retry_after": 3600 }
+}
+```
 
 ---
 
@@ -340,6 +562,17 @@ curl -X POST https://api.mystore.com/v1/auth/refresh \
 **Error Responses:**
 - `401`: Invalid or expired token
 - `403`: Token revoked
+- `429`: Rate limited
+
+**Response 429 Too Many Requests:**
+```json
+{
+  "error": "rate_limited",
+  "message": "Превышен лимит запросов",
+  "details": { "retry_after": 3600 }
+}
+```
+
 
 ---
 
@@ -361,6 +594,14 @@ Authorization: Bearer eyJhbG...
 
 **Error Responses:**
 - `401`: Invalid access token
+
+**Response 401 Unauthorized:**
+```json
+{
+  "error": "invalid_token",
+  "message": "Неверный или просроченный access token"
+}
+```
 
 ---
 
@@ -393,6 +634,14 @@ curl https://api.mystore.com/v1/auth/me \
 
 **Error Responses:**
 - `401`: Invalid access token
+
+**Response 401 Unauthorized:**
+```json
+{
+  "error": "invalid_token",
+  "message": "Неверный или просроченный access token"
+}
+```
 
 ---
 
@@ -492,17 +741,98 @@ Authorization: Bearer eyJhbG...
 
 ## 5. Security Implementation
 
+### 5.1 Rate Limiting
+
 **Algorithm:**
 1. На каждую неудачную попытку логируем IP + email
 2. Если за последний час:
    - 5 неудачных → блокировка 15 минут
    - 10 неудачных → блокировка 24 часа
 
+**Redis Implementation:**
+- **Key pattern:** `rate_limit:failed:{ip}:{hour}`
+- **TTL:** 1 час + 5 минут (автоматическая очистка)
+- **Counter:** INCR/EXPIRE для каждого IP
+- **Per-endpoint limits:**
+  - `/login`: 10 запросов/минута на IP
+  - `/register`: 5 запросов/час на IP
+  - `/verify`: 20 запросов/час на IP
+  - `/refresh`: 30 запросов/минута на IP
+
+### 5.2 Password Security
+
+- **Algorithm:** Argon2id (memory: 64MB, iterations: 3, parallelism: 4)
+- **Minimum length:** 8 символов (рекомендуется 12+)
+- **No password policy** (не требуем специальные символы для удобства)
+
+### 5.3 Token Security
+
+- **Access Token:** HS256, 30 минут, хранение в памяти
+- **Refresh Token:** HS256, 7 дней, HTTP-only cookie + Redis blacklist
+- **Single-use refresh:** Токен инвалидируется после использования
+- **Revocation:** При logout токен добавляется в Redis blacklist
+
+### 5.4 Email Security
+
+- **Verification tokens:** URL-safe base64 UUID, 24 часа
+- **Reset tokens:** UUID v4, 1 час
+- **Tokens одноразовые:** После использования помечаются как использованные в БД
+- **No email enumeration:** Ответы не раскрывают наличие email
+
+---
+
+## 5.5 Threat Model
+
+| Угроза | Митигация |
+|--------|-----------|
+| Brute force атака | Rate limiting (Redis), блокировка по IP/email |
+| Token stealing | HTTP-only cookies, short-lived access tokens, refresh token rotation |
+| SQL Injection | Prepared statements (ORM), parameterized queries |
+| XSS | Content-Security-Policy, sanitize user input, HTTP headers |
+| CSRF | SameSite=Strict cookies, CSRF tokens для чувствительных операций |
+| Password cracking | Argon2id (memory-hard), rate limiting, breach checking (опционально) |
+| Email interception | TLS 1.3+ для SMTP, одноразовые токены, короткий срок действия |
+
+---
+
+## 5.6 Compliance
+
+- **GDPR:** Возможность удаления аккаунта (см. раздел 4.6 DELETE /v1/auth/me)
+- **PII protection:** Email хранится в зашифрованном виде (опционально)
+- **Audit logging:** Все операции логируются (см. раздел 7)
+
 ---
 
 ## 6. Email Integration
 
-### 6.1 Template: Registration Confirmation
+### 6.1 SMTP Client
+
+**Library:** Nodemailer (Node.js) / SendGrid / AWS SES (production)
+
+**Configuration:**
+```javascript
+{
+  host: process.env.SMTP_HOST,
+  port: parseInt(process.env.SMTP_PORT),
+  secure: process.env.SMTP_PORT === '465',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  },
+  tls: {
+    ciphers: 'SSLv3',
+    minVersion: 'TLSv1.2'
+  }
+}
+```
+
+**Features:**
+- Connection pooling (5-10 connections)
+- Retry logic (3 attempts, exponential backoff)
+- Queue system (BullMQ) для высокой нагрузки
+- Bounce detection и handling
+
+### 6.2 Template: Registration Confirmation
 
 **Subject:** Подтверждение email для MyStore
 
@@ -518,7 +848,12 @@ https://mystore.com/verify?token={token}
 Если вы не регистрировались в MyStore, проигнорируйте это письмо.
 ```
 
-### 6.2 Template: Password Reset
+**Template variables:**
+- `{name}` — имя пользователя
+- `{token}` — email verification token
+- `{company}` — название компании (MyStore)
+
+### 6.3 Template: Password Reset
 
 **Subject:** Сброс пароля для MyStore
 
@@ -534,17 +869,49 @@ https://mystore.com/reset-password?token={token}
 Если вы не запрашивали сброс пароля, проигнорируйте это письмо.
 ```
 
-### 6.3 Environment Variables
+**Template variables:**
+- `{email}` — email пользователя
+- `{token}` — password reset token
+- `{company}` — название компании
+
+### 6.4 Email Queue (для высокой нагрузки)
+
+**Technology:** BullMQ (Redis-based queue)
+
+**Queue name:** `emails`
+
+**Job types:**
+- `verification` — email verification
+- `password_reset` — password reset
+- `notification` — general notifications
+
+**Worker configuration:**
+```javascript
+{
+  concurrency: 10,        // parallel workers
+  attempts: 3,            // retry on failure
+  delay: 5000,            // 5s delay between retries
+  backoff: 'exponential'  // exponential backoff
+}
+```
+
+### 6.5 Environment Variables
 
 ```
+# SMTP Configuration
 SMTP_HOST=smtp.mystore.com
 SMTP_PORT=587
 SMTP_USER=noreply@mystore.com
 SMTP_PASS=***
 SMTP_FROM=noreply@mystore.com
 
+# Email URLs (для ссылок в письмах)
 EMAIL_VERIFY_URL=https://mystore.com/verify
 PASSWORD_RESET_URL=https://mystore.com/reset-password
+
+# Email Queue (BullMQ)
+REDIS_URL=redis://localhost:6379
+EMAIL_QUEUE_PREFIX=emails
 ```
 
 ---
@@ -579,17 +946,49 @@ PASSWORD_RESET_URL=https://mystore.com/reset-password
 | Переменная | Обязательная | Описание |
 |------------|--------------|----------|
 | `NODE_ENV` | Да | development, staging, production |
-| `PORT` | Да | Порт сервера |
-| `JWT_ACCESS_SECRET` | Да | Секрет для access tokens |
-| `JWT_REFRESH_SECRET` | Да | Секрет для refresh tokens |
+| `PORT` | Да | Порт сервера (по умолчанию: 3000) |
+| `JWT_ACCESS_SECRET` | Да | Секрет для access tokens (минимум 32 байта) |
+| `JWT_REFRESH_SECRET` | Да | Секрет для refresh tokens (минимум 32 байта) |
 | `DATABASE_URL` | Да | PostgreSQL connection string |
-| `REDIS_URL` | Да | Redis connection string |
+| `REDIS_URL` | Да | Redis connection string (включая пароль, если есть) |
 | `SMTP_HOST` | Да | SMTP сервер |
-| `SMTP_PORT` | Да | SMTP порт |
+| `SMTP_PORT` | Да | SMTP порт (587 для TLS, 465 для SSL) |
 | `SMTP_USER` | Да | SMTP пользователь |
 | `SMTP_PASS` | Да | SMTP пароль |
 | `SMTP_FROM` | Да | From email адрес |
+| `SMTP_TIMEOUT` | Нет | Таймаут SMTP соединения (по умолчанию: 30s) |
+| `SMTP_TLS_MIN_VERSION` | Нет | Минимальная версия TLS (по умолчанию: TLSv1.2) |
 | `APP_URL` | Да | URL приложения (для email ссылок) |
+| `RATE_LIMIT_WINDOW_MS` | Нет | Окно rate limiting в мс (по умолчанию: 60000) |
+| `RATE_LIMIT_MAX` | Нет | Максимальное кол-во запросов (по умолчанию: 100) |
+| `LOG_LEVEL` | Нет | debug, info, warn, error (по умолчанию: info) |
+
+### 8.1 Пример конфигурации (production)
+
+```
+NODE_ENV=production
+PORT=3000
+
+JWT_ACCESS_SECRET=your-super-secret-access-key-min-32-bytes
+JWT_REFRESH_SECRET=your-super-secret-refresh-key-min-32-bytes
+
+DATABASE_URL=postgresql://user:pass@localhost:5432/auth_db?ssl=true
+
+REDIS_URL=redis://:password@localhost:6379/0
+
+SMTP_HOST=smtp.mystore.com
+SMTP_PORT=587
+SMTP_USER=noreply@mystore.com
+SMTP_PASS=smtp-password-here
+SMTP_FROM=noreply@mystore.com
+SMTP_TIMEOUT=30000
+
+APP_URL=https://mystore.com
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_MAX=100
+
+LOG_LEVEL=info
+```
 
 ---
 
