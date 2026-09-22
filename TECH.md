@@ -588,14 +588,16 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 
 **Headers:**
 ```
-Refresh-Token: eyJhbG...
+Authorization: Bearer eyJhbG...
 ```
+
+**Refresh Token Location:** HTTP-only cookie (`refreshToken`)
 
 **Success Response (200):**
 
 ```bash
 curl -X POST https://api.mystore.com/v1/auth/refresh \
-  -H "Refresh-Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
 
 ```json
@@ -712,9 +714,10 @@ curl https://api.mystore.com/v1/auth/me \
 ```
 
 **Error Responses:**
-- `404`: User not found
 - `409`: Email already verified
 - `429`: Rate limited
+
+**Behavior for already verified email:** Возвращает `200 OK` с сообщением `{"message": "Email already verified"}` (идемпотентное поведение)
 
 ---
 
@@ -736,7 +739,10 @@ curl https://api.mystore.com/v1/auth/me \
 }
 ```
 
-**Note:** Не раскрывает существование email (для безопасности)
+**Behavior:** Не раскрывает существование email (для безопасности). Возвращает `200 OK` для любых запросов (существующих и несуществующих email).
+
+**Error Responses:**
+- `429`: Rate limited
 
 ---
 
@@ -834,9 +840,26 @@ Authorization: Bearer eyJhbG...
 - **Tokens одноразовые:** После использования помечаются как использованные в БД
 - **No email enumeration:** Ответы не раскрывают наличие email
 
+### 5.5 Security Headers
+
+**Все ответы API должны содержать следующие заголовки:**
+
+| Заголовок | Значение | Назначение |
+|-----------|----------|------------|
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'` | Ограничение источников контента |
+| `X-Content-Type-Options` | `nosniff` | Запрет MIME-type sniffing |
+| `X-Frame-Options` | `DENY` | Защита от clickjacking |
+| `X-XSS-Protection` | `1; mode=block` | XSS фильтрация (устарел, для совместимости) |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Контроль referrer |
+| `Cache-Control` | `no-store` | Запрет кеширования (для auth endpoints) |
+
+**Для запросов:**
+- `Content-Type: application/json` — обязательный для POST/PUT
+- `Accept: application/json` — проверка на клиенте
+
 ---
 
-## 5.5 Threat Model
+## 5.6 Threat Model
 
 | Угроза | Митигация |
 |--------|-----------|
@@ -850,7 +873,7 @@ Authorization: Bearer eyJhbG...
 
 ---
 
-## 5.6 Compliance
+## 5.7 Compliance
 
 - **GDPR:** Возможность удаления аккаунта (см. раздел 4.6 DELETE /v1/auth/me)
 - **PII protection:** Email хранится в зашифрованном виде (опционально)
@@ -1070,7 +1093,7 @@ LOG_LEVEL=info
 - [ ] SSL/TLS на load balancer
 - [ ] HTTP-only cookie для refresh tokens
 - [ ] CORS настроен правильно
-- [ ] XSS защита
+- [ ] XSS защита (см. раздел 5.5 Security Headers)
 - [ ] SQL injection защита (prepared statements)
 
 ---
