@@ -334,6 +334,8 @@
 | id | UUID | PRIMARY KEY |
 | user_id | UUID | REFERENCES users(id) ON DELETE CASCADE |
 | token | VARCHAR(512) | UNIQUE, NOT NULL (hashed) |
+| ip_address | VARCHAR(45) | NOT NULL (IP при выдаче токена) |
+| user_agent_hash | VARCHAR(64) | SHA-256 хэш от базовой информации user_agent |
 | revoked | BOOLEAN | DEFAULT false |
 | revoked_at | TIMESTAMP | NULL |
 | expires_at | TIMESTAMP | NOT NULL |
@@ -343,6 +345,8 @@
 - `id` — уникальный идентификатор токена (UUID v7)
 - `user_id` — референс на пользователя, каскадное удаление (CASCADE)
 - `token` — хэшированный SHA-256 refresh token (оригинал хранится в HTTP-only cookie)
+- `ip_address` — IP-адрес (IPv4 или IPv6) при выдаче токена (для аудита)
+- `user_agent_hash` — SHA-256 хэш от агрегированной информации user_agent (browser/os/device), без деталей
 - `revoked` — флаг инвалидации (true после logout или компрометации)
 - `revoked_at` — время инвалидации токена (NULL если активен)
 - `expires_at` — время истечения токена (7 дней от создания)
@@ -357,6 +361,7 @@
 - `idx_refresh_token` (token) — для быстрого поиска (по хэшу)
 - `idx_refresh_user_id` (user_id) — для поиска активных токенов
 - `idx_refresh_expires_at` (expires_at) — для очистки истекших токенов
+- `idx_refresh_ip` (ip_address) — для аудита по IP
 
 ### 3.4 reset_password_tokens
 
@@ -389,6 +394,7 @@
 | id | UUID | PRIMARY KEY |
 | email | VARCHAR(255) | NOT NULL |
 | ip_address | VARCHAR(45) | NOT NULL |
+| user_agent_hash | VARCHAR(64) | SHA-256 хэш от базовой информации user_agent (для аудита без идентификации) |
 | success | BOOLEAN | NOT NULL |
 | failed_at | TIMESTAMP | DEFAULT NOW() |
 
@@ -396,6 +402,7 @@
 - `id` — уникальный идентификатор записи (UUID v7)
 - `email` — email, с которого производилась попытка входа
 - `ip_address` — IP-адрес (IPv4 или IPv6, VARCHAR(45) для поддержки IPv6)
+- `user_agent_hash` — SHA-256 хэш от агрегированной информации user_agent (browser/os/device), без деталей
 - `success` — результат попытки: true (успех) или false (неудача)
 - `failed_at` — время попытки входа
 
@@ -403,11 +410,13 @@
 - `idx_attempts_email_ip` (email, ip_address) — для анализа атак
 - `idx_attempts_failed_at` (failed_at) — для очистки старых записей
 - `idx_attempts_email_success` (email, success) — для статистики
+- `idx_attempts_user_agent_hash` (user_agent_hash) — для группировки по типам устройств
 
 **Комментарии:**
 - Логируются все попытки входа (успешные и неуспешные)
 - Для rate limiting: count за последние N минут по IP
 - Для блокировки: count неудачных по email за час
+- `user_agent_hash` хранится для аудита без возможности восстановления полного user_agent (GDPR compliance)
 
 ---
 
@@ -423,11 +432,12 @@
 | `rate_limit:reset-password:{ip}` | String | Счетчик сбросов по IP | 1 час |
 | `rate_limit:refresh:{ip}` | String | Счетчик refresh запросов по IP | 10 мин |
 | `rate_limit:change-password:{ip}` | String | Счетчик смен паролей по IP | 1 час |
-| `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at, jti) | 7 дней |
+| `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at, jti, user_agent_hash) | 7 дней |
 | `revoked_tokens:{refresh_token_hash}` | String | Флаг инвалидации токена | 7 дней |
 | `revoked_access_jti:{jti}` | String | Флаг инвалидации access token по jti | 30 минут |
 | `lock:register:{email}` | String | Блокировка после неудачной рег-ции | 1 час |
 | `lock:forgot-password:{email}` | String | Блокировка после неудачного сброса | 1 час |
+| `user_agent:hash:{hash}` | String | Метаинформация по хэшу user_agent (browser/os/device) | 30 дней |
 
 **Redis Commands used:**
 - `INCR` / `EXPIRE` — счетчики rate limiting
@@ -1162,26 +1172,37 @@ EMAIL_QUEUE_PREFIX=emails
 ```json
 {
   "timestamp": "2024-09-22T10:30:00.000Z",
-  "event": "user.registered" | "user.verified" | "user.logged_in" | "user.logged_out" | "auth.failed" | "token.autorefresh",
+  "event": "user.registered" | "user.verified" | "user.logged_in" | "user.logged_out" | "auth.failed" | "token.autorefresh" | "auth.token_refreshed",
   "user_id": "01a0c637-3aa0-73d4-b85e-8f89aa81e711",
   "email": "user@example.com",
   "ip_address": "192.168.1.1",
-  "user_agent": "Mozilla/5.0...",
+  "user_agent": {
+    "browser": "Chrome",
+    "browser_version": "128.0",
+    "os": "Windows",
+    "os_version": "11",
+    "device": "Desktop"
+  },
   "details": {
-    "jti": "01hv...",      // JWT ID (для token.autorefresh)
+    "jti": "01hv...",      // JWT ID (для token.autorefresh и auth.token_refreshed)
+    "jti_old": "01hv...",  // старый JWT ID (для auth.token_refreshed)
     "request_method": "GET",
     "path": "/api/users"
   }
 }
 ```
 
+**Примечание:** `user_agent` хранится в агрегированном виде без деталей, которые могут идентифицировать пользователя (согласно GDPR принципу минимизации данных).
+
 ### 7.2 Critical Events
 
-- `auth.failed` — логировать с IP и email
-- `user.verified` — логировать user_id
-- `user.logged_in` — логировать user_id и IP
-- `user.logged_out` — логировать user_id
+- `user.registered` — логировать user_id, email, ip_address, user_agent (базовая информация)
+- `user.verified` — логировать user_id, email, ip_address
+- `user.logged_in` — логировать user_id, email, ip_address, user_agent (базовая информация)
+- `user.logged_out` — логировать user_id, email, ip_address
+- `auth.failed` — логировать email, ip_address, user_agent (базовая информация)
 - `token.autorefresh` — логировать jti, метод запроса и путь (при авто-обновлении access token)
+- `auth.token_refreshed` — логировать user_id, email, ip_address, jti (новый токен), jti_old (старый токен), user_agent (базовая информация)
 
 ---
 
