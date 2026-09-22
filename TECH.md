@@ -333,6 +333,7 @@
 | user_id | UUID | REFERENCES users(id) ON DELETE CASCADE |
 | token | VARCHAR(512) | UNIQUE, NOT NULL (hashed) |
 | revoked | BOOLEAN | DEFAULT false |
+| revoked_at | TIMESTAMP | NULL |
 | expires_at | TIMESTAMP | NOT NULL |
 | created_at | TIMESTAMP | DEFAULT NOW() |
 
@@ -341,8 +342,14 @@
 - `user_id` — референс на пользователя, каскадное удаление (CASCADE)
 - `token` — хэшированный SHA-256 refresh token (оригинал хранится в HTTP-only cookie)
 - `revoked` — флаг инвалидации (true после logout или компрометации)
+- `revoked_at` — время инвалидации токена (NULL если активен)
 - `expires_at` — время истечения токена (7 дней от создания)
 - `created_at` — время выдачи токена
+
+**Revocation Flow:**
+1. При logout: `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ?`
+2. При проверке refresh: `WHERE jti = ? AND revoked = FALSE AND expires_at > NOW()`
+3. Очистка: удаление revoked токенов старше N дней (cron-задача)
 
 **Индексы:**
 - `idx_refresh_token` (token) — для быстрого поиска (по хэшу)
@@ -382,14 +389,30 @@
 
 | Ключ | Тип | Описание | TTL |
 |------|-----|----------|-----|
-| `rate_limit:login:{ip}:{hour}` | String | Счетчик неудачных логинов по IP | 1 час |
-| `rate_limit:register:{ip}:{day}` | String | Счетчик регистраций по IP | 24 часа |
-| `rate_limit:verify:{ip}:{day}` | String | Счетчик верификаций по IP | 24 часа |
-| `rate_limit:refresh:{ip}:{minute}` | String | Счетчик refresh запросов по IP | 15 минут |
+| `rate_limit:login:{ip}` | String | Счетчик логинов по IP | 10 мин |
+| `rate_limit:login:block:{email}` | String | Блокировка аккаунта после неудач | 15-24 часа |
+| `rate_limit:register:{ip}` | String | Счетчик регистраций по IP | 1 час |
+| `rate_limit:verify:{ip}` | String | Счетчик верификаций по IP | 1 час |
+| `rate_limit:forgot-password:{ip}` | String | Счетчик запросов сброса по IP | 1 час |
+| `rate_limit:reset-password:{ip}` | String | Счетчик сбросов по IP | 1 час |
+| `rate_limit:refresh:{ip}` | String | Счетчик refresh запросов по IP | 10 мин |
+| `rate_limit:change-password:{ip}` | String | Счетчик смен паролей по IP | 1 час |
 | `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at, jti) | 7 дней |
 | `revoked_tokens:{refresh_token_hash}` | String | Флаг инвалидации токена | 7 дней |
 | `revoked_access_jti:{jti}` | String | Флаг инвалидации access token по jti | 30 минут |
-| `lock:login:{email}` | String | Блокировка аккаунта после неудач | 15-24 часа |
+| `lock:register:{email}` | String | Блокировка после неудачной рег-ции | 1 час |
+| `lock:forgot-password:{email}` | String | Блокировка после неудачного сброса | 1 час |
+
+**Redis Commands used:**
+- `INCR` / `EXPIRE` — счетчики rate limiting
+- `HSET` / `HGET` — хранение session data
+- `SET` / `GET` / `GETSET` — флаги revoked tokens и access jti
+- `DEL` — удаление истекших записей
+
+**Revocation Flow:**
+1. При logout: `SET revoked_tokens:{refresh_token_hash} 1 EX 604800`
+2. При истечении access token: проверка `GET revoked_access_jti:{jti}`
+3. При refresh: инвалидация старого refresh token + создание нового с новым jti
 
 **Redis Commands used:**
 - `INCR` / `EXPIRE` — счетчики rate limiting
@@ -797,87 +820,157 @@ Authorization: Bearer eyJhbG...
 
 ### 5.1 Rate Limiting
 
+**Per-endpoint limits:**
+
+| Endpoint | Лимит | Period | Блокировка | Логика сброса |
+|----------|-------|--------|------------|---------------|
+| `/login` | 5 | 10 мин | 15 мин | При успешном входе |
+| `/register` | 3 | 1 час | 1 час | При успешной регистрации |
+| `/verify` | 10 | 1 час | 30 мин | При успешной верификации |
+| `/forgot-password` | 3 | 1 час | 1 час | При успешном сбросе |
+| `/reset-password` | 5 | 1 час | 1 час | При успешном сбросе |
+| `/refresh` | 30 | 10 мин | — | Без блокировки |
+| `/change-password` | 5 | 1 час | 1 час | При успешной смене |
+
 **Algorithm:**
 1. На каждую неудачную попытку логируем IP + email
-2. Если за последний час:
+2. Если за период лимита превышено количество запросов → 429
+3. Для `/login` и `/register`: после 5 неудачных попыток включается блокировка
    - 5 неудачных → блокировка 15 минут
    - 10 неудачных → блокировка 24 часа
 
 **Redis Implementation:**
-- **Key pattern:** `rate_limit:failed:{ip}:{hour}`
-- **TTL:** 1 час + 5 минут (автоматическая очистка)
-- **Counter:** INCR/EXPIRE для каждого IP
-- **Per-endpoint limits:**
-  - `/login`: 10 запросов/минута на IP
-  - `/register`: 5 запросов/час на IP
-  - `/verify`: 20 запросов/час на IP
-  - `/refresh`: 30 запросов/минута на IP
+- **Key pattern:** `rate_limit:{endpoint}:{identifier}:{window}`
+- **Identifier:** IP для общего лимита, email для блокировки аккаунта
+- **TTL:** Period + 5 минут (автоматическая очистка)
+- **Counter:** INCR/EXPIRE для каждого identifier
+- **Block key:** `lock:{endpoint}:{identifier}` с TTL = duration
+
+**Timing Attack Protection:**
+- Использовать константное сравнение для всех критичных проверок:
+  - `crypto.timingSafeEqual()` для сравнения хэшей паролей
+  - `crypto.timingSafeEqual()` для сравнения токенов
+  - `hmac.compare_digest()` (Python) / `ConstantTimeCompare()` (Go)
+- Избегать раннего выхода из функций сравнения
 
 ### 5.2 Password Security
 
 - **Algorithm:** Argon2id (memory: 64MB, iterations: 3, parallelism: 4)
 - **Minimum length:** 8 символов (рекомендуется 12+)
 - **No password policy** (не требуем специальные символы для удобства)
+- **Timing-safe comparison:** Обязательное константное сравнение хэшей
 
 ### 5.3 Token Security
 
-- **Access Token:** RS256, 30 минут, хранение в памяти
-  - Каждый токен имеет уникальный `jti` (UUIDv7)
-  - `jti` хранится в Redis с TTL=30 минут для отслеживания
-  - Авто-обновление при истечении (только safe methods)
-- **Refresh Token:** RS256, 7 дней, HTTP-only cookie + Redis blacklist
-  - Каждый токен имеет уникальный `jti` (UUIDv7)
-  - После использования инвалидируется в БД и Redis
-  - `jti` добавляется в Redis blacklist с TTL = оставшееся время жизни
-- **Single-use refresh:** Токен инвалидируется после использования
-- **Revocation:** При logout токен добавляется в Redis blacklist
-- **JWT ID tracking:** `revoked_access_jti:{jti}` в Redis для предотвращения повторного использования
+**Refresh Token Revocation:**
+- При logout токен **помечается как revoked в БД** (`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW()`)
+- Одновременно `jti` токена добавляется в Redis blacklist с TTL = оставшееся время жизни
+- **Токен НЕ удаляется из БД** (для аудита и предотвращения reuse)
+- Очистка revoked токенов: периодический cron-джоб удаления токенов, revoked = TRUE и expired более N дней назад
+
+**Refresh Token Structure:**
+- `revoked` (BOOLEAN, default FALSE) — флаг инвалидации
+- `revoked_at` (TIMESTAMP, NULL) — время инвалидации
+- При проверке refresh token: `WHERE jti = ? AND revoked = FALSE AND expires_at > NOW()`
+
+**Access Token:**
+- RS256, 30 минут, хранение в памяти
+- Каждый токен имеет уникальный `jti` (UUIDv7)
+- `jti` хранится в Redis с TTL=30 минут для отслеживания
+- Авто-обновление при истечении (только safe methods)
+- При logout: `revoked_access_jti:{jti}` добавляется в Redis с TTL=30 минут
+
+**Refresh Token:**
+- RS256, 7 дней, HTTP-only cookie + Redis blacklist
+- После использования инвалидируется в БД и Redis
+- Single-use refresh: токен инвалидируется после использования
+
+**Timing Attack Protection:**
+- Использовать константное сравнение для всех критичных проверок:
+  - `crypto.timingSafeEqual()` для сравнения хэшей паролей
+  - `crypto.timingSafeEqual()` для сравнения токенов
+  - `hmac.compare_digest()` (Python) / `ConstantTimeCompare()` (Go)
+- Избегать раннего выхода из функций сравнения
 
 ### 5.4 Email Security
 
 - **Verification tokens:** URL-safe base64 UUID, 24 часа
-- **Reset tokens:** UUID v4, 1 час
+- **Reset tokens:** UUIDv7, 1 час
+- **Forgot-password tokens:** UUIDv7, 1 час
 - **Tokens одноразовые:** После использования помечаются как использованные в БД
 - **No email enumeration:** Ответы не раскрывают наличие email
+- **Timing-safe comparison:** Обязательное константное сравнение токенов при verify/reset
 
-### 5.5 Security Headers
+### 5.5 CSRF Protection
 
-**Все ответы API должны содержать следующие заголовки:**
+**Для endpoints с HTTP-only cookie (refresh token):**
 
-| Заголовок | Значение | Назначение |
-|-----------|----------|------------|
-| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'` | Ограничение источников контента |
-| `X-Content-Type-Options` | `nosniff` | Запрет MIME-type sniffing |
-| `X-Frame-Options` | `DENY` | Защита от clickjacking |
-| `X-XSS-Protection` | `1; mode=block` | XSS фильтрация (устарел, для совместимости) |
-| `Referrer-Policy` | `strict-origin-when-cross-origin` | Контроль referrer |
-| `Cache-Control` | `no-store` | Запрет кеширования (для auth endpoints) |
+| Endpoint | Cookie | CSRF Protection |
+|----------|--------|-----------------|
+| `/login` | Нет | CSRF token + SameSite=None (если cross-origin) |
+| `/register` | Нет | CSRF token + SameSite=None (если cross-origin) |
+| `/refresh` | HTTP-only cookie | SameSite=Strict + Origin validation |
+| `/logout` | HTTP-only cookie | SameSite=Strict + Origin validation |
+| `/me` | Нет | Origin validation |
+| `/change-password` | HTTP-only cookie | SameSite=Strict + CSRF token (опционально для API) |
 
-**Для запросов:**
-- `Content-Type: application/json` — обязательный для POST/PUT
-- `Accept: application/json` — проверка на клиенте
+**Обязательные защиты:**
+- `SameSite=Strict` для всех cookie (не отправляются при cross-site запросах)
+- `Secure` флаг для cookie (только HTTPS)
+- `HttpOnly` флаг для refresh token cookie
+- **Origin validation** на сервере для всех запросов
+- **Referer/Preferrer policy** заголовки
+
+**Пример проверки Origin:**
+```javascript
+const allowedOrigins = ['https://mystore.com', 'https://www.mystore.com'];
+const origin = req.headers.origin;
+if (!allowedOrigins.includes(origin)) {
+  return res.status(403).json({ error: 'invalid_origin' });
+}
+```
 
 ---
 
-## 5.6 Threat Model
+## 5.7 Threat Model
 
 | Угроза | Митигация |
 |--------|-----------|
-| Brute force атака | Rate limiting (Redis), блокировка по IP/email |
-| Token stealing | HTTP-only cookies, short-lived access tokens, refresh token rotation |
+| Brute force атака | Rate limiting (Redis), блокировка по IP/email, timing-safe comparison |
+| Token stealing | HTTP-only cookies, short-lived access tokens, refresh token rotation, revocation tracking |
 | SQL Injection | Prepared statements (ORM), parameterized queries |
 | XSS | Content-Security-Policy, sanitize user input, HTTP headers |
-| CSRF | SameSite=Strict cookies, CSRF tokens для чувствительных операций |
+| CSRF | SameSite=Strict cookies, Origin/Referer validation, CSRF tokens для чувствительных операций |
 | Password cracking | Argon2id (memory-hard), rate limiting, breach checking (опционально) |
 | Email interception | TLS 1.3+ для SMTP, одноразовые токены, короткий срок действия |
+| Timing Attack | Константное сравнение хэшей (`timingSafeEqual`, `ConstantTimeCompare`) для всех критичных проверок |
+| Token reuse | Refresh token инвалидируется после использования, revoked флаг в БД + Redis blacklist |
+| Account enumeration | Ответы не раскрывают наличие email, timing-safe comparison при verify/login |
+| Session hijacking | Short-lived access tokens, HTTP-only cookies, Origin validation |
 
 ---
 
-## 5.7 Compliance
+## 5.9 Compliance
 
 - **GDPR:** Возможность удаления аккаунта (см. раздел 4.6 DELETE /v1/auth/me)
 - **PII protection:** Email хранится в зашифрованном виде (опционально)
 - **Audit logging:** Все операции логируются (см. раздел 7)
+
+---
+
+## 5.10 Implementation Checklist
+
+**Backend:**
+- [ ] Константное сравнение для всех критичных проверок (password hash, tokens)
+- [ ] Проверка Origin/Referer для всех auth endpoints
+- [ ] SameSite=Strict для всех cookie
+- [ ] Secure флаг для cookie (только HTTPS в production)
+- [ ] HTTP-only флаг для refresh token cookie
+- [ ] Rate limiting для всех endpoints (Redis)
+- [ ] Блокировка аккаунтов после превышения лимита неудач
+- [ ] Revocation flow для logout (UPDATE revoked + Redis blacklist)
+- [ ] Проверка revoked флага при refresh
+- [ ] Очистка старых revoked токенов (cron-задача)
 
 ---
 
