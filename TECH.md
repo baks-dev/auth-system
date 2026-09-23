@@ -5,10 +5,11 @@
 | [README.md](./README.md) | Главная страница спецификации                                     |
 | [PRODUCT.md](./PRODUCT.md) | Продуктовая спецификация — что делается, для кого               |
 | [TECH.md](./TECH.md)    | Техническая спецификация — архитектура, API, БД, безопасность      |
+| [GLOSSARY.md](./GLOSSARY.md) | Глоссарий терминов                                            |
 
 ---
 
-## 1. Архитектура
+## 1. Architecture / Архитектура
 
 ```
 ┌─────────────┐
@@ -58,9 +59,9 @@
 
 ---
 
-## 1.1 Диаграмма потоков данных
+## 1.1 Data Flow Diagrams / Диаграмма потоков данных
 
-### Регистрация пользователя
+### User Registration / Регистрация пользователя
 
 ```
 ┌──────────┐    1. POST /register    ┌──────────────────┐
@@ -100,7 +101,7 @@
                                     └─────────────────────┘
 ```
 
-### Аутентификация (Login)
+### Authentication (Login) / Аутентификация (Login)
 
 ```
 ┌──────────┐    1. POST /login       ┌──────────────────┐
@@ -132,7 +133,7 @@
                                     └─────────────────────┘
 ```
 
-### Refresh токена
+### Token Refresh / Refresh токена
 
 ```
 ┌──────────┐    1. POST /refresh     ┌──────────────────┐
@@ -163,7 +164,7 @@
                                     └─────────────────────┘
 ```
 
-### Logout
+### Logout / Выход из системы
 
 ```
 ┌──────────┐    1. POST /logout      ┌──────────────────┐
@@ -190,9 +191,9 @@
 
 ---
 
-## 2. JWT Структура
+## 2. JWT Structure / JWT Структура
 
-### 2.1 Access Token
+### 2.1 Access Token / Токен доступа
 
 **Header:**
 ```json
@@ -222,7 +223,7 @@
 **Ключ:** Приватный ключ хранится в переменной окружения `JWT_PRIVATE_KEY` (PEM format)  
 **Верификация:** Публичный ключ доступен через `/.well-known/jwks.json` или из `JWT_PUBLIC_KEY`
 
-### 2.3 Обработка истекших Access Tokens
+### 2.3 Handling Expired Access Tokens / Обработка истекших Access Tokens
 
 **Стратегия:** Token refresh при истечении в середине запроса
 
@@ -242,7 +243,7 @@
 - При получении 401 с `X-Token-Status: expired` выполнить refresh token flow
 - При `X-Token-Refresh: true` можно продолжить работу (token обновлен прозрачно)
 
-### 2.4 Refresh Token
+### 2.4 Refresh Token / Токен обновления
 
 **Header:**
 ```json
@@ -271,7 +272,7 @@
 
 ---
 
-## 3. Database Schema
+## 3. Database Schema / Схема базы данных
 
 ### 3.1 users
 
@@ -424,7 +425,7 @@
 
 ---
 
-### 3.5 Redis Keys (для rate limiting и session management)
+### 3.6 Redis Keys (для rate limiting и session management) / Ключи Redis (для ограничения частоты запросов и управления сессиями)
 
 | Ключ | Тип | Описание | TTL |
 |------|-----|----------|-----|
@@ -551,20 +552,6 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 }
 ```
 
-**Success Response (200):**
-```json
-{
-  "access_token": "eyJhbG...",
-  "refresh_token": "eyJhbG...",
-  "token_type": "bearer",
-  "expires_in": 1800
-}
-```
-
-**Error Responses:**
-- `400`: Invalid or expired token
-- `409`: Email already verified
-
 **Example Request:**
 ```bash
 curl -X POST https://api.mystore.com/v1/auth/verify \
@@ -573,6 +560,19 @@ curl -X POST https://api.mystore.com/v1/auth/verify \
     "token": "abc123xyz"
   }'
 ```
+
+**Success Response (200):**
+```json
+{
+  "access_token": "eyJhbG..."
+}
+```
+
+**Error Responses:**
+- `400`: Invalid or expired token
+- `400`: Token not found
+- `409`: Email already verified
+
 
 **Response 400 Bad Request:**
 ```json
@@ -597,8 +597,7 @@ curl -X POST https://api.mystore.com/v1/auth/verify \
 }
 ```
 
-**Success Response (200):**
-
+**Example Request:**
 ```bash
 curl -X POST https://api.mystore.com/v1/auth/login \
   -H "Content-Type: application/json" \
@@ -608,12 +607,10 @@ curl -X POST https://api.mystore.com/v1/auth/login \
   }'
 ```
 
+**Success Response (200):**
 ```json
 {
-  "access_token": "eyJhbG...",
-  "refresh_token": "eyJhbG...",
-  "token_type": "bearer",
-  "expires_in": 1800
+  "access_token": "eyJhbG..."
 }
 ```
 
@@ -666,13 +663,13 @@ Authorization: Bearer eyJhbG...   // Access token для идентификац�
 - Access token передается в `Authorization: Bearer <token>` для идентификации сессии
 - При успешном refresh генерируется **новый refresh token** и устанавливается как cookie (старый инвалидируется)
 
-**Success Response (200):**
-
+**Example Request:**
 ```bash
 curl -X POST https://api.mystore.com/v1/auth/refresh \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
 
+**Success Response (200):**
 ```json
 {
   "access_token": "eyJhbG...",
@@ -695,7 +692,6 @@ curl -X POST https://api.mystore.com/v1/auth/refresh \
 }
 ```
 
-
 ---
 
 ### 4.5 POST /v1/auth/logout
@@ -707,6 +703,12 @@ curl -X POST https://api.mystore.com/v1/auth/refresh \
 Authorization: Bearer eyJhbG...
 ```
 
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/logout \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
 **Success Response (200):**
 ```json
 {
@@ -716,12 +718,6 @@ Authorization: Bearer eyJhbG...
 
 **Error Responses:**
 - `401`: Invalid access token
-
-**Example Request:**
-```bash
-curl -X POST https://api.mystore.com/v1/auth/logout \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-```
 
 **Response 401 Unauthorized:**
 ```json
@@ -742,13 +738,13 @@ curl -X POST https://api.mystore.com/v1/auth/logout \
 Authorization: Bearer eyJhbG...
 ```
 
-**Success Response (200):**
-
+**Example Request:**
 ```bash
 curl https://api.mystore.com/v1/auth/me \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
 
+**Success Response (200):**
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -761,7 +757,7 @@ curl https://api.mystore.com/v1/auth/me \
 ```
 
 **Error Responses:**
-- `401`: Invalid access token
+- `401`: Invalid or expired access token
 
 **Response 401 Unauthorized:**
 ```json
@@ -784,6 +780,15 @@ curl https://api.mystore.com/v1/auth/me \
 }
 ```
 
+**Example Request:**
+```bash
+curl -X POST https://api.mystore.com/v1/auth/resend-verification \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com"
+  }'
+```
+
 **Success Response (200):**
 ```json
 {
@@ -795,16 +800,9 @@ curl https://api.mystore.com/v1/auth/me \
 - `409`: Email already verified
 - `429`: Rate limited
 
-**Example Request:**
-```bash
-curl -X POST https://api.mystore.com/v1/auth/resend-verification \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "user@example.com"
-  }'
-```
 
-**Behavior for already verified email:** Возвращает `200 OK` с сообщением `{"message": "Email already verified"}` (идемпотентное поведение)
+**Behavior for already verified email:** 
+Возвращает `200 OK` с сообщением `{"message": "Email already verified"}` (идемпотентное поведение)
 
 ---
 
@@ -819,13 +817,6 @@ curl -X POST https://api.mystore.com/v1/auth/resend-verification \
 }
 ```
 
-**Success Response (200):**
-```json
-{
-  "message": "Password reset instructions sent to your email."
-}
-```
-
 **Example Request:**
 ```bash
 curl -X POST https://api.mystore.com/v1/auth/forgot-password \
@@ -835,6 +826,13 @@ curl -X POST https://api.mystore.com/v1/auth/forgot-password \
   }'
 ```
 
+**Success Response (200):**
+```json
+{
+  "message": "Password reset instructions sent to your email."
+}
+```
+
 **Behavior:** Не раскрывает существование email (для безопасности). Возвращает `200 OK` для любых запросов (существующих и несуществующих email).
 
 **Error Responses:**
@@ -842,7 +840,7 @@ curl -X POST https://api.mystore.com/v1/auth/forgot-password \
 
 ---
 
-### 4.9 POST /v1/auth/reset-password
+### 4.9 POST /v1/auth/reset-password / Сброс пароля
 
 **Описание:** Сброс пароля с токеном
 
@@ -854,13 +852,6 @@ curl -X POST https://api.mystore.com/v1/auth/forgot-password \
 }
 ```
 
-**Success Response (200):**
-```json
-{
-  "message": "Password has been reset successfully."
-}
-```
-
 **Example Request:**
 ```bash
 curl -X POST https://api.mystore.com/v1/auth/reset-password \
@@ -869,6 +860,42 @@ curl -X POST https://api.mystore.com/v1/auth/reset-password \
     "token": "reset-token-from-email",
     "password": "NewSecurePass123"
   }'
+```
+
+**Success Response (200):**
+```json
+{
+  "message": "Password has been reset successfully."
+}
+```
+
+**Error Responses:**
+- `400`: Invalid or expired token
+- `404`: Token not found
+- `429`: Rate limited
+
+**Response 400 Bad Request (invalid token):**
+```json
+{
+  "error": "invalid_token",
+  "message": "Invalid reset password token"
+}
+```
+
+**Response 400 Bad Request (expired token):**
+```json
+{
+  "error": "expired_token",
+  "message": "Reset password token has expired"
+}
+```
+
+**Response 404 Not Found:**
+```json
+{
+  "error": "token_not_found",
+  "message": "Reset password token does not exist"
+}
 ```
 
 ---
@@ -884,13 +911,6 @@ curl -X POST https://api.mystore.com/v1/auth/reset-password \
 }
 ```
 
-**Success Response (200):**
-```json
-{
-  "message": "Successfully unsubscribed from newsletter"
-}
-```
-
 **Example Request:**
 ```bash
 curl -X POST https://api.mystore.com/v1/auth/unsubscribe \
@@ -898,6 +918,13 @@ curl -X POST https://api.mystore.com/v1/auth/unsubscribe \
   -d '{
     "token": "unsubscribe-token-from-email"
   }'
+```
+
+**Success Response (200):**
+```json
+{
+  "message": "Successfully unsubscribed from newsletter"
+}
 ```
 
 **Error Responses:**
@@ -923,13 +950,6 @@ Authorization: Bearer eyJhbG...
 }
 ```
 
-**Success Response (200):**
-```json
-{
-  "message": "Password has been changed successfully."
-}
-```
-
 **Example Request:**
 ```bash
 curl -X PUT https://api.mystore.com/v1/auth/change-password \
@@ -941,11 +961,83 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
   }'
 ```
 
+**Success Response (200):**
+```json
+{
+  "message": "Password has been changed successfully."
+}
+```
+
+**Error Responses:**
+- `400`: Current password is incorrect or new password does not meet requirements
+- `401`: Invalid or expired access token
+- `429`: Rate limited
+
+**Response 400 Bad Request (wrong current password):**
+```json
+{
+  "error": "invalid_credentials",
+  "message": "Current password is incorrect"
+}
+```
+
+**Response 400 Bad Request (weak new password):**
+```json
+{
+  "error": "weak_password",
+  "message": "New password does not meet requirements (minimum 8 characters, must contain uppercase, lowercase, and number)"
+}
+```
+
+**Response 401 Unauthorized:**
+```json
+{
+  "error": "invalid_token",
+  "message": "Invalid or expired access token"
+}
+```
+
 ---
 
-## 5. Security Implementation
+### 4.12 DELETE /v1/auth/me
 
-### 5.1 Rate Limiting
+**Описание:** Удаление аккаунта текущего пользователя (GDPR compliance)
+
+**Headers:**
+```
+Authorization: Bearer eyJhbG...
+```
+
+**Example Request:**
+```bash
+curl -X DELETE https://api.mystore.com/v1/auth/me \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+**Success Response (200):**
+```json
+{
+  "message": "Account has been permanently deleted."
+}
+```
+
+**Error Responses:**
+- `401`: Invalid access token
+- `403`: Email not verified
+
+**Response 403 Forbidden:**
+```json
+{
+  "error": "email_not_verified",
+  "message": "Please verify your email before deleting your account"
+}
+```
+
+---
+
+## 5. Security Implementation / Реализация безопасности
+
+### 5.1 Rate Limiting / Ограничение частоты запросов
 
 **Per-endpoint limits:**
 
@@ -986,14 +1078,14 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
   - `hmac.compare_digest()` (Python) / `ConstantTimeCompare()` (Go)
 - Избегать раннего выхода из функций сравнения
 
-### 5.2 Password Security
+### 5.2 Password Security / Безопасность паролей
 
 - **Algorithm:** Argon2id (memory: 64MB, iterations: 3, parallelism: 4)
 - **Minimum length:** 8 символов (рекомендуется 12+)
 - **No password policy** (не требуем специальные символы для удобства)
 - **Timing-safe comparison:** Обязательное константное сравнение хэшей
 
-### 5.3 Token Security
+### 5.3 Token Security / Безопасность токенов
 
 **Refresh Token Revocation:**
 - При logout токен **помечается как revoked в БД** (`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ? AND user_id = ?`)
@@ -1037,7 +1129,7 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
   - `hmac.compare_digest()` (Python) / `ConstantTimeCompare()` (Go)
 - Избегать раннего выхода из функций сравнения
 
-### 5.4 Email Security
+### 5.4 Email Security / Безопасность email
 
 - **Verification tokens:** URL-safe base64 UUID, TTL = 24 часа (см. 3.2 email_verification_tokens)
 - **Reset tokens:** UUIDv7, TTL = 1 час (см. 3.4 reset_password_tokens)
@@ -1047,7 +1139,7 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
 - **No email enumeration:** Ответы не раскрывают наличие email
 - **Timing-safe comparison:** Обязательное константное сравнение токенов при verify/reset
 
-### 5.5 CSRF Protection
+### 5.5 CSRF Protection / Защита от CSRF
 
 **Для endpoints с HTTP-only cookie (refresh token):**
 
@@ -1058,7 +1150,7 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
 | `/refresh` | HTTP-only cookie | SameSite=Strict + Origin validation |
 | `/logout` | HTTP-only cookie | SameSite=Strict + Origin validation |
 | `/me` | Нет | Origin validation |
-| `/change-password` | HTTP-only cookie | SameSite=Strict + CSRF token (опционально для API) |
+| `/change-password` | HTTP-only cookie | SameSite=Strict + Origin validation |
 
 **Обязательные защиты:**
 - `SameSite=Strict` для всех cookie (не отправляются при cross-site запросах)
@@ -1078,7 +1170,23 @@ if (!allowedOrigins.includes(origin)) {
 
 ---
 
-## 5.7 Threat Model
+## 5.6 Security Headers / Заголовки безопасности
+
+Дополнительные HTTP заголовки для защиты:
+
+| Заголовок | Значение | Описание |
+|-----------|----------|----------|
+| `Content-Security-Policy` | `default-src 'self'` | Ограничивает источники контента |
+| `X-Content-Type-Options` | `nosniff` | Отключает MIME-sniffing |
+| `X-Frame-Options` | `DENY` | Защита от clickjacking |
+| `X-XSS-Protection` | `1; mode=block` | XSS фильтр (legacy) |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Контроль referrer |
+| `Permissions-Policy` | `geolocation=(), microphone=()` | Ограничение API |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | HSTS для HTTPS |
+
+---
+
+## 5.7 Threat Model / Модель угроз
 
 | Угроза | Митигация |
 |--------|-----------|
@@ -1098,19 +1206,37 @@ if (!allowedOrigins.includes(origin)) {
 
 ---
 
-## 5.9 Compliance
+## 5.8 Security Implementation Summary / Краткое резюме реализации безопасности
 
-- **GDPR:** Возможность удаления аккаунта (см. раздел 4.6 DELETE /v1/auth/me)
+**Ключевые механизмы безопасности:**
+
+| Механизм | Описание | Реализация |
+|----------|----------|------------|
+| **Rate Limiting** | Защита от brute force и DoS | Redis + per-endpoint лимиты |
+| **Token Rotation** | Одноразовость refresh tokens | Revoked флаг + Redis blacklist |
+| **Token Binding** | Привязка к IP + User-Agent | Проверка при каждом refresh |
+| **Timing-safe** | Константное сравнение | crypto.timingSafeEqual() |
+| **CSRF Protection** | SameSite=Strict + Origin validation | HTTP middleware |
+| **Secure Cookies** | HttpOnly + Secure flags | HTTP-only для refresh token |
+| **Short-lived Tokens** | Access token 30 мин | JWT exp claim |
+| **Audit Logging** | Логирование всех операций | Event schema в разделе 7 |
+
+---
+
+## 5.9 Compliance / Соответствие стандартам
+
+- **GDPR:** Возможность удаления аккаунта (см. раздел 4.12 DELETE /v1/auth/me)
 - **PII protection:** Email хранится в зашифрованном виде (опционально)
 - **Audit logging:** Все операции логируются (см. раздел 7)
 
 ---
 
-## 5.10 Implementation Checklist
+## 5.10 Implementation Checklist / Чеклист реализации
 
 **Backend:**
 - [ ] Константное сравнение для всех критичных проверок (password hash, tokens)
-- [ ] Проверка Origin/Referer для всех auth endpoints
+- **Проверка Origin/Referer для всех auth endpoints**
+- **Security Headers (CSP, HSTS, X-Frame-Options)**
 - [ ] SameSite=Strict для всех cookie
 - [ ] Secure флаг для cookie (только HTTPS в production)
 - [ ] HTTP-only флаг для refresh token cookie
@@ -1124,9 +1250,9 @@ if (!allowedOrigins.includes(origin)) {
 
 ---
 
-## 6. Email Integration
+## 6. Email Integration / Интеграция email
 
-### 6.1 SMTP Client
+### 6.1 SMTP Client / Клиент SMTP
 
 **Library:** Nodemailer (Node.js) / SendGrid / AWS SES (production)
 
@@ -1153,7 +1279,7 @@ if (!allowedOrigins.includes(origin)) {
 - Queue system (BullMQ) для высокой нагрузки
 - Bounce detection и handling
 
-### 6.2 Template: Registration Confirmation
+### 6.2 Template: Registration Confirmation / Шаблон: Подтверждение регистрации
 
 **Subject:** Подтверждение email для MyStore
 
@@ -1180,7 +1306,7 @@ https://mystore.com/unsubscribe?token={unsubscribe_token}
 - `{unsubscribe_token}` — токен для отписки от рассылки (UUIDv7 из users.unsubscribe_token)
 - `{company}` — название компании (MyStore)
 
-### 6.3 Template: Password Reset
+### 6.3 Template: Password Reset / Шаблон: Сброс пароля
 
 **Subject:** Сброс пароля для MyStore
 
@@ -1207,7 +1333,7 @@ https://mystore.com/unsubscribe?token={unsubscribe_token}
 - `{unsubscribe_token}` — токен для отписки от рассылки (UUIDv7 из users.unsubscribe_token)
 - `{company}` — название компании
 
-### 6.4 Email Queue (для высокой нагрузки)
+### 6.4 Email Queue (для высокой нагрузки) / Очередь email (для высокой нагрузки)
 
 **Technology:** BullMQ (Redis-based queue)
 
@@ -1229,7 +1355,7 @@ https://mystore.com/unsubscribe?token={unsubscribe_token}
 }
 ```
 
-### 6.5 Environment Variables
+### 6.5 Environment Variables / Переменные окружения
 
 ```
 # SMTP Configuration
@@ -1252,9 +1378,9 @@ EMAIL_QUEUE_PREFIX=emails
 
 ---
 
-## 7. Logging
+## 7. Logging / Логирование
 
-### 7.1 Event Schema
+### 7.1 Event Schema / Схема событий
 
 ```json
 {
@@ -1281,7 +1407,7 @@ EMAIL_QUEUE_PREFIX=emails
 
 **Примечание:** `user_agent` хранится в агрегированном виде без деталей, которые могут идентифицировать пользователя (согласно GDPR принципу минимизации данных).
 
-### 7.2 Critical Events
+### 7.2 Critical Events / Критические события
 
 - `user.registered` — логировать user_id, email, ip_address, user_agent (базовая информация)
 - `user.verified` — логировать user_id, email, ip_address
@@ -1293,7 +1419,7 @@ EMAIL_QUEUE_PREFIX=emails
 
 ---
 
-## 8. Environment Variables
+## 8. Environment Variables / Переменные окружения
 
 | Переменная | Обязательная | Описание |
 |------------|--------------|----------|
@@ -1318,7 +1444,7 @@ EMAIL_QUEUE_PREFIX=emails
 | `RATE_LIMIT_MAX` | Нет | Максимальное кол-во запросов (по умолчанию: 100) |
 | `LOG_LEVEL` | Нет | debug, info, warn, error (по умолчанию: info) |
 
-### 8.1 Пример конфигурации (production)
+### 8.1 Example Configuration (production) / Пример конфигурации (production)
 
 ```
 NODE_ENV=production
@@ -1350,9 +1476,9 @@ LOG_LEVEL=info
 
 ---
 
-## 9. Deployment Checklist
+## 9. Deployment Checklist / Чеклист развёртывания
 
-### Database
+### Database / База данных
 - [ ] Создать таблицы (users, email_verification_tokens, refresh_tokens, login_attempts)
 - [ ] Создать индексы
 - [ ] Настроить резервное копирование
@@ -1364,7 +1490,7 @@ LOG_LEVEL=info
 - [ ] Настроить логирование
 - [ ] Настроить мониторинг (метрики)
 
-### Security
+### Security / Безопасность
 - [ ] SSL/TLS на load balancer
 - [ ] HTTP-only cookie для refresh tokens
 - [ ] CORS настроен правильно
@@ -1373,9 +1499,9 @@ LOG_LEVEL=info
 
 ---
 
-## 10. Testing Strategy
+## 10. Testing Strategy / Стратегия тестирования
 
-### Unit Tests
+### Unit Tests / Юнит-тесты
 - Целевое покрытие: **≥85%** для критических модулей (auth, token handling, password hashing)
 - Целевое покрытие: **≥70%** для остальных модулей
 - Хэширование паролей (argon2id)
@@ -1385,7 +1511,7 @@ LOG_LEVEL=info
 - **JWT ID (jti) генерация и уникальность**
 - **Revocation check по jti в Redis**
 
-### Интеграционные тесты
+### Integration Tests / Интеграционные тесты
 - Полный процесс регистрации / registration
 - Процесс подтверждения электронной почты / verification
 - Процесс входа в систему / login
@@ -1398,7 +1524,7 @@ LOG_LEVEL=info
 - **Edge case: Access token истек в момент refresh (должен вернуть 401)**
 - **Edge case: Использованный refresh token (reuse attack)**
 
-### E2E Tests
+### E2E Tests / E2E тесты
 - Фреймворки: Cypress / Playwright
 - Проверка UI (если есть)
 - **Security Scenarios:**
