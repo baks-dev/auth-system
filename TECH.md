@@ -9,7 +9,7 @@
 
 ---
 
-## 1. Architecture / Архитектура
+## 1. Архитектура
 
 ```
 ┌─────────────┐
@@ -61,7 +61,7 @@
 
 ## 1.1 Data Flow Diagrams / Диаграмма потоков данных
 
-### User Registration / Регистрация пользователя
+### Регистрация пользователя
 
 ```
 ┌──────────┐    1. POST /register    ┌──────────────────┐
@@ -101,7 +101,7 @@
                                     └─────────────────────┘
 ```
 
-### Authentication (Login) / Аутентификация (Login)
+### Аутентификация
 
 ```
 ┌──────────┐    1. POST /login       ┌──────────────────┐
@@ -133,7 +133,7 @@
                                     └─────────────────────┘
 ```
 
-### Token Refresh / Обновление токена
+### Обновление токена
 
 ```
 ┌──────────┐    1. POST /refresh     ┌──────────────────┐
@@ -164,7 +164,7 @@
                                     └─────────────────────┘
 ```
 
-### Logout / Выход из системы
+### Выход из системы
 
 ```
 ┌──────────┐    1. POST /logout      ┌──────────────────┐
@@ -191,9 +191,9 @@
 
 ---
 
-## 2. JWT Structure / JWT Структура
+## 2. Структура JWT
 
-### 2.1 Access Token / Токен доступа
+### 2.1 Токен доступа
 
 **Header:**
 ```json
@@ -206,21 +206,21 @@
 **Payload:**
 ```json
 {
-  "jti": "uuid-v7",           // JWT ID (unique identifier for token tracking)
-  "sub": "uuid-v7",           // user ID (time-based)
+  "jti": "uuid-v7",           // JWT ID (уникальный идентификатор для отслеживания токена)
+  "sub": "uuid-v7",           // ID пользователя (time-based)
   "email": "user@example.com",
   "name": "Иван Иванов",
   "role": "user",             // "user" | "admin"
   "is_email_verified": true,  // флаг подтверждения email (обновляется при /v1/auth/verify)
-  "auth_time": 1726989600,    // authentication time (unix timestamp)
-  "iat": 1726989600,          // issued at (unix timestamp)
-  "exp": 1726991400           // expires at (unix timestamp)
+  "auth_time": 1726989600,    // время аутентификации (Unix timestamp)
+  "iat": 1726989600,          // время выдачи (Unix timestamp)
+  "exp": 1726991400           // время истечения (Unix timestamp, 30 минут)
 }
 ```
 
 **Срок жизни:** 30 минут  
 **Алгоритм:** RS256  
-**Ключ:** Приватный ключ хранится в переменной окружения `JWT_PRIVATE_KEY` (PEM format)  
+**Ключ:** Приватный ключ хранится в переменной окружения `JWT_PRIVATE_KEY` (формат PEM)  
 **Верификация:** Публичный ключ доступен через `/.well-known/jwks.json` или из `JWT_PUBLIC_KEY`
 
 **Обновление `is_email_verified`:**
@@ -228,27 +228,27 @@
 - После `/v1/auth/verify` создаётся **новый** access token с `is_email_verified = true`
 - Старые tokens остаются валидными до истечения срока, но новая сессия будет иметь обновлённое значение
 
-### 2.3 Handling Expired Access Tokens / Обработка истекших Access Tokens
+### 2.3 Обработка истекших токенов доступа
 
-**Стратегия:** Token refresh при истечении в середине запроса
+**Стратегия:** Token refresh (авто-обновление) при истечении в середине запроса
 
 | Время до exp | Действие | Ответ |
 |--------------|----------|-------|
 | `exp - now > 5s` | Обычный запрос | 200 OK |
-| `exp - now <= 5s` | Авто-обновление (только safe methods) | 200 OK + `X-Token-Refresh: true` header |
-| `exp - now < 0` (просрочен) | Требуется refresh | 401 Unauthorized + `X-Token-Status: expired` |
+| `exp - now <= 5s` | Авто-обновление (только safe methods: GET, HEAD, OPTIONS) | 200 OK + заголовок `X-Token-Refresh: true` |
+| `exp - now < 0` (просрочен) | Требуется refresh | 401 Unauthorized + заголовок `X-Token-Status: expired` |
 
 **Правила:**
 - **Safe methods (GET, HEAD, OPTIONS):** Автоматически обновляют access token через refresh, если истек менее 5 секунд назад
 - **Unsafe methods (POST, PUT, DELETE):** Возвращают 401 без авто-обновления
 - **Header:** При авто-обновлении добавляется `X-Token-Refresh: true` для информирования клиента
-- **Логирование:** Все авто-обновления логируются с `event: "token.autorefresh"`
+- **Логирование:** Все авто-обновления логируются с `event: token.autorefresh`
 
 **Рекомендация для клиентов:**
-- При получении 401 с `X-Token-Status: expired` выполнить refresh token flow
-- При `X-Token-Refresh: true` можно продолжить работу (token обновлен прозрачно)
+- При получении 401 с `X-Token-Status: expired` выполнить flow refresh token
+- При `X-Token-Refresh: true` можно продолжить работу (token обновлён прозрачно)
 
-### 2.4 Refresh Token / Токен обновления
+### 2.4 Токен обновления
 
 **Header:**
 ```json
@@ -261,11 +261,11 @@
 **Payload:**
 ```json
 {
-  "jti": "uuid-v7",           // JWT ID (unique identifier for revocation tracking)
-  "sub": "uuid-v7",           // user ID
+  "jti": "uuid-v7",           // JWT ID (уникальный идентификатор для отслеживания инвалидации)
+  "sub": "uuid-v7",           // ID пользователя
   "email": "user@example.com",
-  "iat": 1726989600,          // issued at (unix timestamp)
-  "exp": 1727076000           // expires at (unix timestamp, 7 days)
+  "iat": 1726989600,          // время выдачи (Unix timestamp)
+  "exp": 1727076000           // время истечения (Unix timestamp, 7 дней)
 }
 ```
 
@@ -277,9 +277,9 @@
 
 ---
 
-## 3. Database Schema / Схема базы данных
+## 3. Схема базы данных
 
-### 3.1 users
+### 3.1 Таблица users
 
 | Поле | Тип | Описание |
 |------|-----|----------|
@@ -295,22 +295,22 @@
 | updated_at | TIMESTAMP | DEFAULT NOW() |
 
 **Описание полей:**
-- `id` — уникальный идентификатор пользователя (UUID v7)
+- `id` — уникальный идентификатор пользователя (UUIDv7)
 - `email` — email для входа и коммуникации, уникальный
 - `name` — отображаемое имя пользователя
-- `password_hash` — хэш пароля (argon2id), без соли
-- `role` — роль пользователя: 'user' или 'admin'
-- `is_email_verified` — флаг подтвержденного email
-- `email_verified_at` — время подтверждения email (после verification)
+- `password_hash` — хэш пароля (Argon2id), без соли
+- `role` — роль пользователя: `user` или `admin`
+- `is_email_verified` — флаг подтверждённого email
+- `email_verified_at` — время подтверждения email (после verify)
 - `created_at` — время создания записи
 - `updated_at` — время последнего обновления
 
 **Индексы:**
-- `idx_users_email` (email) — для быстрого поиска при login/registration
+- `idx_users_email` (email) — для быстрого поиска при login/registration (аутентификация/регистрация)
 - `idx_users_role` (role) — для фильтрации по ролям
 - `idx_users_unsubscribe_token` (unsubscribe_token) — для быстрой отписки
 
-### 3.2 email_verification_tokens
+### 3.2 Таблица email_verification_tokens
 
 | Поле | Тип | Описание |
 |------|-----|----------|
@@ -339,7 +339,7 @@
 - Если email уже подтверждён (`is_email_verified = true`), возвращается `409 Conflict`
 - Токен может быть использован только один раз: `DELETE FROM email_verification_tokens WHERE token = ? AND user_id = ? AND used_at IS NULL AND expires_at > NOW()`
 
-### 3.3 refresh_tokens
+### 3.3 Таблица refresh_tokens
 
 | Поле | Тип | Описание |
 |------|-----|----------|
@@ -347,7 +347,7 @@
 | user_id | UUID | REFERENCES users(id) ON DELETE CASCADE |
 | token | VARCHAR(512) | UNIQUE, NOT NULL (hashed) |
 | ip_address | VARCHAR(45) | NOT NULL (IP при выдаче токена) |
-| user_agent_hash | VARCHAR(64) | SHA-256 хэш от базовой информации user_agent |
+- `user_agent_hash` | VARCHAR(64) | SHA-256 хэш от базовой информации User-Agent
 | revoked | BOOLEAN | DEFAULT false |
 | revoked_at | TIMESTAMP | NULL |
 | expires_at | TIMESTAMP | NOT NULL |
@@ -383,7 +383,7 @@
 - `idx_refresh_expires_at` (expires_at) — для очистки истекших токенов
 - `idx_refresh_ip` (ip_address) — для аудита по IP
 
-### 3.4 reset_password_tokens
+### 3.4 Таблица reset_password_tokens
 
 | Поле | Тип | Описание |
 |------|-----|----------|
@@ -395,7 +395,7 @@
 | used_at | TIMESTAMP | NULL |
 
 **Описание полей:**
-- `id` — уникальный идентификатор токена (UUID v7)
+- `id` — уникальный идентификатор токена (UUIDv7)
 - `user_id` — референс на пользователя, каскадное удаление
 - `token` — UUIDv7 для сброса пароля, одноразовый
 - `expires_at` — время истечения токена (1 час от создания)
@@ -407,7 +407,7 @@
 - `idx_reset_user_id` (user_id) — для поиска активных токенов
 - `idx_reset_expires_at` (expires_at) — для очистки истекших токенов
 
-### 3.5 login_attempts
+### 3.5 Таблица login_attempts
 
 | Поле | Тип | Описание |
 |------|-----|----------|
@@ -419,7 +419,7 @@
 | failed_at | TIMESTAMP | DEFAULT NOW() |
 
 **Описание полей:**
-- `id` — уникальный идентификатор записи (UUID v7)
+- `id` — уникальный идентификатор записи (UUIDv7)
 - `email` — email, с которого производилась попытка входа
 - `ip_address` — IP-адрес (IPv4 или IPv6, VARCHAR(45) для поддержки IPv6)
 - `user_agent_hash` — SHA-256 хэш от агрегированной информации user_agent (browser/os/device), без деталей
@@ -436,11 +436,11 @@
 - Логируются все попытки входа (успешные и неуспешные)
 - Для rate limiting: count за последние N минут по IP
 - Для блокировки: count неудачных по email за час
-- `user_agent_hash` хранится для аудита без возможности восстановления полного user_agent (GDPR compliance)
+- `user_agent_hash` хранится для аудита без возможности восстановления полного User-Agent (GDPR compliance)
 
 ---
 
-### 3.6 Redis Keys (для rate limiting и session management) / Ключи Redis (для ограничения частоты запросов и управления сессиями)
+### 3.6 Ключи Redis (rate limiting, session management)
 
 | Ключ | Тип | Описание | TTL |
 |------|-----|----------|-----|
@@ -452,12 +452,12 @@
 | `rate_limit:reset-password:{ip}` | String | Счетчик сбросов по IP | 1 час |
 | `rate_limit:refresh:{ip}` | String | Счетчик refresh запросов по IP | 10 мин |
 | `rate_limit:change-password:{ip}` | String | Счетчик смен паролей по IP | 1 час |
-| `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at, jti, user_agent_hash) | 7 дней |
+| `session:{refresh_token_hash}` | Hash | Информация о сессии (user_id, created_at, jti, ip_address, user_agent_hash) | 7 дней |
 | `revoked_tokens:{refresh_token_hash}` | String | Флаг инвалидации токена | 7 дней |
 | `revoked_access_jti:{jti}` | String | Флаг инвалидации access token по jti | 30 минут |
-| `lock:register:{email}` | String | Блокировка после неудачной рег-ции | 1 час |
+| `lock:register:{email}` | String | Блокировка после неудачной регистрации | 1 час |
 | `lock:forgot-password:{email}` | String | Блокировка после неудачного сброса | 1 час |
-| `user_agent:hash:{hash}` | String | Метаинформация по хэшу user_agent (browser/os/device) | 30 дней |
+| `user_agent:hash:{hash}` | String | Метаинформация по хэшу User-Agent (browser/os/device) | 30 дней |
 
 **Redis Keys:**
 - `session:{refresh_token_hash}` — информация о сессии (user_id, created_at, jti, ip_address, user_agent_hash)
@@ -480,7 +480,7 @@
 
 ---
 
-## 4. Endpoints
+## 4. Конечные точки API
 
 ### 4.1 POST /v1/auth/register
 
@@ -529,9 +529,9 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 {
   "error": "validation_failed",
   "details": {
-    "email": "Invalid email format",
-    "password": "Password must contain at least 8 characters",
-    "name": "Name cannot be empty"
+    "email": "Неверный формат email",
+    "password": "Пароль должен содержать не менее 8 символов",
+    "name": "Имя не может быть пустым"
   }
 }
 ```
@@ -540,7 +540,7 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 ```json
 {
   "error": "email_exists",
-  "message": "A user with this email already exists",
+  "message": "Пользователь с этим email уже существует",
   "details": {}
 }
 ```
@@ -583,18 +583,19 @@ curl -X POST https://api.mystore.com/v1/auth/verify \
   "refresh_token": "eyJhbG..."
 }
 ```
+}`
 
 **Error Responses:**
-- `400`: Invalid or expired token
-- `400`: Token not found
-- `409`: Email already verified
+- `400`: Неверный или истекший токен
+- `400`: Токен не найден
+- `409`: Email уже подтверждён
 
 
 **Response 400 Bad Request:**
 ```json
 {
   "error": "invalid_token",
-  "message": "Invalid or expired verification token",
+  "message": "Неверный или истекший токен подтверждения",
   "details": {}
 }
 ```
@@ -664,7 +665,7 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 ```json
 {
   "error": "invalid_credentials",
-  "message": "Invalid email or password"
+  "message": "Неверный email или пароль"
 }
 ```
 
@@ -672,7 +673,7 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 ```json
 {
   "error": "email_not_confirmed",
-  "message": "Please verify your email before logging in"
+  "message": "Пожалуйста, подтвердите email перед входом"
 }
 ```
 
@@ -719,8 +720,8 @@ curl -X POST https://api.mystore.com/v1/auth/refresh \
 ```
 
 **Error Responses:**
-- `401`: Invalid or expired token
-- `403`: Token revoked
+- `401`: Неверный или истекший токен
+- `403`: Токен отозван
 - `429`: Rate limited
 
 **Response 429 Too Many Requests:**
@@ -752,12 +753,12 @@ curl -X POST https://api.mystore.com/v1/auth/logout \
 **Success Response (200):**
 ```json
 {
-  "message": "Logged out successfully"
+  "message": "Вы успешно вышли из системы"
 }
 ```
 
 **Error Responses:**
-- `401`: Invalid access token
+- `401`: Неверный токен доступа
 
 **Response 401 Unauthorized:**
 ```json
@@ -797,13 +798,13 @@ curl https://api.mystore.com/v1/auth/me \
 ```
 
 **Error Responses:**
-- `401`: Invalid or expired access token
+- `401`: Неверный или истекший токен доступа
 
 **Response 401 Unauthorized:**
 ```json
 {
   "error": "invalid_token",
-  "message": "Invalid or expired access token"
+  "message": "Неверный или истекший токен доступа"
 }
 ```
 
@@ -832,7 +833,7 @@ curl -X POST https://api.mystore.com/v1/auth/resend-verification \
 **Success Response (200):**
 ```json
 {
-  "message": "Verification email sent. Please check your inbox."
+  "message": "Письмо с подтверждением отправлено. Пожалуйста, проверьте почту."
 }
 ```
 
@@ -842,7 +843,7 @@ curl -X POST https://api.mystore.com/v1/auth/resend-verification \
 
 
 **Behavior for already verified email:** 
-Возвращает `200 OK` с сообщением `{"message": "Email already verified"}` (идемпотентное поведение)
+Возвращает `200 OK` с сообщением `{"message": "Email уже подтверждён"}` (идемпотентное поведение)
 
 ---
 
@@ -863,24 +864,24 @@ curl -X POST https://api.mystore.com/v1/auth/forgot-password \
   -H "Content-Type: application/json" \
   -d '{
     "email": "user@example.com"
-  }'
+}
 ```
 
 **Success Response (200):**
 ```json
 {
-  "message": "Password reset instructions sent to your email."
+  "message": "Инструкции по сбросу пароля отправлены на email."
 }
 ```
 
 **Behavior:** Не раскрывает существование email (для безопасности). Возвращает `200 OK` для любых запросов (существующих и несуществующих email).
 
 **Error Responses:**
-- `429`: Rate limited
+- `429`: Превышен лимит запросов
 
 ---
 
-### 4.9 POST /v1/auth/reset-password / Сброс пароля
+### 4.9 POST /v1/auth/reset-password
 
 **Описание:** Сброс пароля с токеном
 
@@ -905,20 +906,20 @@ curl -X POST https://api.mystore.com/v1/auth/reset-password \
 **Success Response (200):**
 ```json
 {
-  "message": "Password has been reset successfully."
+  "message": "Пароль успешно сброшен."
 }
 ```
 
 **Error Responses:**
-- `400`: Invalid or expired token
-- `404`: Token not found
-- `429`: Rate limited
+- `400`: Неверный или истекший токен
+- `404`: Токен не найден
+- `429`: Превышен лимит запросов
 
 **Response 400 Bad Request (invalid token):**
 ```json
 {
   "error": "invalid_token",
-  "message": "Invalid reset password token"
+  "message": "Неверный токен сброса пароля"
 }
 ```
 
@@ -963,7 +964,7 @@ curl -X POST https://api.mystore.com/v1/auth/unsubscribe \
 **Success Response (200):**
 ```json
 {
-  "message": "Successfully unsubscribed from newsletter"
+  "message": "Успешная отписка от рассылки"
 }
 ```
 
@@ -1004,20 +1005,20 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
 **Success Response (200):**
 ```json
 {
-  "message": "Password has been changed successfully."
+  "message": "Пароль успешно изменен."
 }
 ```
 
 **Error Responses:**
-- `400`: Current password is incorrect or new password does not meet requirements
-- `401`: Invalid or expired access token
-- `429`: Rate limited
+- `400`: Текущий пароль неверный или новый пароль не соответствует требованиям
+- `401`: Неверный или истекший токен доступа
+- `429`: Превышен лимит запросов
 
 **Response 400 Bad Request (wrong current password):**
 ```json
 {
   "error": "invalid_credentials",
-  "message": "Current password is incorrect"
+  "message": "Текущий пароль неверный"
 }
 ```
 
@@ -1034,6 +1035,7 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
 {
   "error": "invalid_token",
   "message": "Invalid or expired access token"
+"message": "Неверный или истекший токен доступа"
 }
 ```
 
@@ -1057,31 +1059,31 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
 **Success Response (200):**
 ```json
 {
-  "message": "Account has been permanently deleted."
+  "message": "Аккаунт удалён навсегда."
 }
 ```
 
 **Error Responses:**
-- `401`: Invalid access token
-- `403`: Email not verified
+- `401`: Неверный токен доступа
+- `403`: Email не подтверждён
 
 **Response 403 Forbidden:**
 ```json
 {
   "error": "email_not_verified",
-  "message": "Please verify your email before deleting your account"
+  "message": "Пожалуйста, подтвердите email перед удалением аккаунта"
 }
 ```
 
 ---
 
-## 5. Security Implementation / Реализация безопасности
+## 5. Реализация безопасности
 
-### 5.1 Rate Limiting / Ограничение частоты запросов
+### 5.1 Ограничение частоты запросов
 
 **Per-endpoint limits:**
 
-| Endpoint | Лимит | Period | Блокировка | Логика сброса |
+| Endpoint | Лимит | Период | Тайм-аут блокировки | Логика сброса |
 |----------|-------|--------|------------|---------------|
 | `/login` | 5 | 10 мин | 15 мин | При успешном входе |
 | `/register` | 3 | 1 час | 1 час | При успешной регистрации |
@@ -1109,7 +1111,7 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
 **Logout Rate Limiting:**
 - Ключ: `rate_limit:logout:{ip}`
 - TTL: 15 минут (10 мин + 5 мин)
-- Logout защищен от DoS через лимит 30 запросов в 10 минут по IP
+- Logout защищён от DoS через лимит 30 запросов в 10 минут по IP
 
 **Timing Attack Protection:**
 - Использовать константное сравнение для всех критичных проверок:
@@ -1118,17 +1120,17 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
   - `hmac.compare_digest()` (Python) / `ConstantTimeCompare()` (Go)
 - Избегать раннего выхода из функций сравнения
 
-### 5.2 Password Security / Безопасность паролей
+### 5.2 Безопасность паролей
 
 - **Algorithm:** Argon2id (memory: 64MB, iterations: 3, parallelism: 4)
 - **Minimum length:** 8 символов (рекомендуется 12+)
 - **No password policy** (не требуем специальные символы для удобства)
 - **Timing-safe comparison:** Обязательное константное сравнение хэшей
 
-### 5.3 Token Security / Безопасность токенов
+### 5.3 Безопасность токенов
 
 **Refresh Token Revocation:**
-- При logout токен **помечается как revoked в БД** (`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ? AND user_id = ?`)
+- При logout токен помечается как revoked в БД (`UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ? AND user_id = ?`)
 - Одновременно `jti` токена добавляется в Redis blacklist с TTL = оставшееся время жизни
 - **Токен НЕ удаляется из БД** (для аудита и предотвращения reuse)
 - Очистка revoked токенов: периодический cron-джоб удаления токенов, revoked = TRUE и expired более N дней назад
@@ -1169,7 +1171,7 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
   - `hmac.compare_digest()` (Python) / `ConstantTimeCompare()` (Go)
 - Избегать раннего выхода из функций сравнения
 
-### 5.4 Email Security / Безопасность email
+### 5.4 Безопасность email
 
 **Email Verification Token:**
 - Срок жизни: 24 часа
@@ -1183,8 +1185,8 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
 - Token binding (IP + user_agent_hash) **не применяется** к verify, так как пользователь может подтвердить email из любого устройства
 - Rate limiting: 10 запросов в час, с 30-минутной блокировкой при превышении
 
-**Why return refresh_token after verify?**
-1. **User Experience:** Пользователь, который только что подтвердил email, должен продолжать работать без повторного логина
+**Почему возвращается refresh_token после verify?**
+1. **User Experience (UX):** Пользователь, который только что подтвердил email, должен продолжать работать без повторного логина
 2. **Consistency:** Verify — это завершение регистрации, а не отдельный endpoint. Логически он должен выдавать те же токены, что и login
 3. **Security:** Refresh token в HTTP-only cookie защищён от XSS. Возвращение только access_token в response body было бы неполноценным решением
 4. **Token Rotation:** При verify генерируется новый refresh_token, старый (если был) инвалидируется — это повышает безопасность
@@ -1197,7 +1199,7 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
 - **No email enumeration:** Ответы не раскрывают наличие email
 - **Timing-safe comparison:** Обязательное константное сравнение токенов при verify/reset
 
-### 5.5 CSRF Protection / Защита от CSRF
+### 5.5 Защита от CSRF
 
 **Для endpoints с HTTP-only cookie (refresh token):**
 
@@ -1215,7 +1217,7 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
 - `Secure` флаг для cookie (только HTTPS)
 - `HttpOnly` флаг для refresh token cookie
 - **Origin validation** на сервере для всех запросов
-- **Referer/Preferrer policy** заголовки
+- **Referer/Referrer policy** заголовки
 
 **Пример проверки Origin:**
 ```javascript
@@ -1228,7 +1230,7 @@ if (!allowedOrigins.includes(origin)) {
 
 ---
 
-## 5.6 Security Headers / Заголовки безопасности
+## 5.6 Заголовки безопасности
 
 Дополнительные HTTP заголовки для защиты:
 
@@ -1244,44 +1246,44 @@ if (!allowedOrigins.includes(origin)) {
 
 ---
 
-## 5.7 Threat Model / Модель угроз
+## 5.7 Модель угроз
 
 | Угроза | Митигация |
 |--------|-----------|
-| Brute force атака | Rate limiting (Redis), блокировка по IP/email, timing-safe comparison |
-| Token stealing | HTTP-only cookies, short-lived access tokens, refresh token rotation, revocation tracking |
-| Token binding attack | IP + User-Agent binding для refresh tokens, проверка при каждом использовании |
-| SQL Injection | Prepared statements (ORM), parameterized queries |
-| XSS | Content-Security-Policy, sanitize user input, HTTP headers |
-| CSRF | SameSite=Strict cookies, Origin/Referer validation, CSRF tokens для чувствительных операций |
-| Password cracking | Argon2id (memory-hard), rate limiting, breach checking (опционально) |
-| Email interception | TLS 1.3+ для SMTP, одноразовые токены, короткий срок действия |
-| Timing Attack | Константное сравнение хэшей (`timingSafeEqual`, `ConstantTimeCompare`) для всех критичных проверок |
-| Token reuse | Refresh token инвалидируется после использования, revoked флаг в БД + Redis blacklist |
-| Account enumeration | Ответы не раскрывают наличие email, timing-safe comparison при verify/login |
-| Session hijacking | Short-lived access tokens, HTTP-only cookies, Origin validation |
-| Logout DoS | Rate limiting (30/10min по IP) для logout endpoint |
+| Brute force атака | Ограничение частоты запросов (Redis, rate limiting), блокировка по IP/email, константное сравнение (timing-safe) |
+| Кража токенов | HTTP-only cookies, короткоживущие access tokens, rotation refresh tokens, отслеживание инвалидации |
+| Атака через привязку токена | Привязка IP + User-Agent для refresh tokens, проверка при каждом использовании |
+| SQL-инъекция | Подготовленные выражения (prepared statements/ORM), параметризованные запросы |
+| XSS | Content-Security-Policy, очистка пользовательского ввода, заголовки безопасности |
+| CSRF | SameSite=Strict cookies, проверка Origin/Referer, CSRF-токены для чувствительных операций |
+| Взлом паролей | Argon2id (memory-hard), ограничение частоты запросов, проверка на утечки (опционально) |
+| Перехват email | TLS 1.3+ для SMTP, одноразовые токены, короткий срок действия |
+| Атаки по времени | Константное сравнение хэшей (timingSafeEqual, ConstantTimeCompare) для всех критичных проверок |
+| Повторное использование токена | Refresh token инвалидируется после использования, revoked флаг в БД + Redis blacklist |
+| Перечисление аккаунтов | Ответы не раскрывают наличие email, константное сравнение (timing-safe) при verify/login |
+| Перехват сессии | Короткоживущие access tokens, HTTP-only cookies, проверка Origin |
+| DoS при logout | Ограничение частоты запросов (30/10 мин по IP) для logout endpoint |
 
 ---
 
-## 5.8 Security Implementation Summary / Краткое резюме реализации безопасности
+## 5.8 Краткое резюме реализации безопасности
 
 **Ключевые механизмы безопасности:**
 
 | Механизм | Описание | Реализация |
 |----------|----------|------------|
-| **Rate Limiting** | Защита от brute force и DoS | Redis + per-endpoint лимиты |
-| **Token Rotation** | Одноразовость refresh tokens | Revoked флаг + Redis blacklist |
-| **Token Binding** | Привязка к IP + User-Agent | Проверка при каждом refresh |
-| **Timing-safe** | Константное сравнение | crypto.timingSafeEqual() |
-| **CSRF Protection** | SameSite=Strict + Origin validation | HTTP middleware |
-| **Secure Cookies** | HttpOnly + Secure flags | HTTP-only для refresh token |
-| **Short-lived Tokens** | Access token 30 мин | JWT exp claim |
-| **Audit Logging** | Логирование всех операций | Event schema в разделе 7 |
+| **Ограничение частоты запросов** | Защита от brute force и DoS | Redis + лимиты на endpoint |
+| **Rotation токенов** | Одноразовость refresh tokens | Revoked флаг + Redis blacklist |
+| **Привязка токена** | Привязка к IP + User-Agent | Проверка при каждом refresh |
+| **Константное сравнение** | Защита от атак по времени | crypto.timingSafeEqual() |
+| **Защита от CSRF** | SameSite=Strict + проверка Origin | HTTP middleware |
+| **Защищённые cookies** | HttpOnly + Secure флаги | HTTP-only для refresh token |
+| **Короткоживущие токены** | Access token 30 минут | JWT exp claim |
+| **Аудит логирование** | Логирование всех операций | Event schema (раздел 7) |
 
 ---
 
-## 5.9 Compliance / Соответствие стандартам
+## 5.9 Соответствие стандартам
 
 - **GDPR:** Возможность удаления аккаунта (см. раздел 4.12 DELETE /v1/auth/me)
 - **PII protection:** Email хранится в зашифрованном виде (опционально)
@@ -1289,12 +1291,12 @@ if (!allowedOrigins.includes(origin)) {
 
 ---
 
-## 5.10 Implementation Checklist / Чеклист реализации
+## 5.10 Чеклист реализации
 
 **Backend:**
 - [ ] Константное сравнение для всех критичных проверок (password hash, tokens)
-- **Проверка Origin/Referer для всех auth endpoints**
-- **Security Headers (CSP, HSTS, X-Frame-Options)**
+- Проверка Origin/Referer для всех auth endpoints
+- Security Headers (CSP, HSTS, X-Frame-Options)
 - [ ] SameSite=Strict для всех cookie
 - [ ] Secure флаг для cookie (только HTTPS в production)
 - [ ] HTTP-only флаг для refresh token cookie
@@ -1308,9 +1310,9 @@ if (!allowedOrigins.includes(origin)) {
 
 ---
 
-## 6. Email Integration / Интеграция email
+## 6. Интеграция email
 
-### 6.1 SMTP Client / Клиент SMTP
+### 6.1 Клиент SMTP
 
 **Library:** Nodemailer (Node.js) / SendGrid / AWS SES (production)
 
@@ -1325,7 +1327,7 @@ if (!allowedOrigins.includes(origin)) {
     pass: process.env.SMTP_PASS
   },
   tls: {
-    ciphers: 'SSLv3',
+    ciphers: 'TLSv1.2',
     minVersion: 'TLSv1.2'
   }
 }
@@ -1337,7 +1339,7 @@ if (!allowedOrigins.includes(origin)) {
 - Queue system (BullMQ) для высокой нагрузки
 - Bounce detection и handling
 
-### 6.2 Template: Registration Confirmation / Шаблон: Подтверждение регистрации
+### 6.2 Шаблон: Подтверждение регистрации
 
 **Subject:** Подтверждение email для MyStore
 
@@ -1364,7 +1366,7 @@ https://mystore.com/unsubscribe?token={unsubscribe_token}
 - `{unsubscribe_token}` — токен для отписки от рассылки (UUIDv7 из users.unsubscribe_token)
 - `{company}` — название компании (MyStore)
 
-### 6.3 Template: Password Reset / Шаблон: Сброс пароля
+### 6.3 Шаблон: Сброс пароля
 
 **Subject:** Сброс пароля для MyStore
 
@@ -1391,29 +1393,29 @@ https://mystore.com/unsubscribe?token={unsubscribe_token}
 - `{unsubscribe_token}` — токен для отписки от рассылки (UUIDv7 из users.unsubscribe_token)
 - `{company}` — название компании
 
-### 6.4 Email Queue (для высокой нагрузки) / Очередь email (для высокой нагрузки)
+### 6.4 Очередь email (для высокой нагрузки)
 
 **Technology:** BullMQ (Redis-based queue)
 
 **Queue name:** `emails`
 
 **Job types:**
-- `verification` — email verification
-- `password_reset` — password reset
-- `unsubscribe` — handling unsubscribe requests
-- `notification` — general notifications
+- `verification` — email verification (подтверждение)
+- `password_reset` — password reset (сброс пароля)
+- `unsubscribe` — handling unsubscribe requests (обработка отписок)
+- `notification` — general notifications (уведомления)
 
 **Worker configuration:**
 ```javascript
 {
-  concurrency: 10,        // parallel workers
-  attempts: 3,            // retry on failure
-  delay: 5000,            // 5s delay between retries
-  backoff: 'exponential'  // exponential backoff
+  concurrency: 10,        // параллельные воркеры
+  attempts: 3,            // повтор при ошибке
+  delay: 5000,            // 5 сек задержка между повторами
+  backoff: 'exponential'  // экспоненциальная задержка
 }
 ```
 
-### 6.5 Environment Variables / Переменные окружения
+### 6.5 Переменные окружения
 
 ```
 # SMTP Configuration
@@ -1436,9 +1438,9 @@ EMAIL_QUEUE_PREFIX=emails
 
 ---
 
-## 7. Logging / Логирование
+## 7. Логирование
 
-### 7.1 Event Schema / Схема событий
+### 7.1 Схема событий
 
 ```json
 {
@@ -1465,7 +1467,7 @@ EMAIL_QUEUE_PREFIX=emails
 
 **Примечание:** `user_agent` хранится в агрегированном виде без деталей, которые могут идентифицировать пользователя (согласно GDPR принципу минимизации данных).
 
-### 7.2 Critical Events / Критические события
+### 7.2 Критические события
 
 - `user.registered` — логировать user_id, email, ip_address, user_agent (базовая информация)
 - `user.verified` — логировать user_id, email, ip_address
@@ -1477,7 +1479,7 @@ EMAIL_QUEUE_PREFIX=emails
 
 ---
 
-## 8. Environment Variables / Переменные окружения
+## 8. Переменные окружения
 
 | Переменная | Обязательная | Описание |
 |------------|--------------|----------|
@@ -1502,7 +1504,7 @@ EMAIL_QUEUE_PREFIX=emails
 | `RATE_LIMIT_MAX` | Нет | Максимальное кол-во запросов (по умолчанию: 100) |
 | `LOG_LEVEL` | Нет | debug, info, warn, error (по умолчанию: info) |
 
-### 8.1 Example Configuration (production) / Пример конфигурации (production)
+### 8.1 Пример конфигурации (production)
 
 ```
 NODE_ENV=production
@@ -1534,9 +1536,9 @@ LOG_LEVEL=info
 
 ---
 
-## 9. Deployment Checklist / Чеклист развёртывания
+## 9. Чеклист развёртывания
 
-### Database / База данных
+### База данных
 - [ ] Создать таблицы (users, email_verification_tokens, refresh_tokens, login_attempts)
 - [ ] Создать индексы
 - [ ] Настроить резервное копирование
@@ -1548,47 +1550,47 @@ LOG_LEVEL=info
 - [ ] Настроить логирование
 - [ ] Настроить мониторинг (метрики)
 
-### Security / Безопасность
+### Безопасность
 - [ ] SSL/TLS на load balancer
 - [ ] HTTP-only cookie для refresh tokens
 - [ ] CORS настроен правильно
-- [ ] XSS защита (см. раздел 5.5 Security Headers)
+- [ ] XSS защита (см. раздел 5.6 Заголовки безопасности)
 - [ ] SQL injection защита (prepared statements)
 
 ---
 
-## 10. Testing Strategy / Стратегия тестирования
+## 10. Стратегия тестирования
 
-### Unit Tests / Юнит-тесты
+### Юнит-тесты
 - Целевое покрытие: **≥85%** для критических модулей (auth, token handling, password hashing)
 - Целевое покрытие: **≥70%** для остальных модулей
 - Хэширование паролей (argon2id)
 - Подпись/проверка JWT (RS256)
 - Генерация токенов электронной почты
-- Ограничение запросов / Rate limiting
-- **JWT ID (jti) генерация и уникальность**
-- **Revocation check по jti в Redis**
+- Ограничение запросов (rate limiting)
+- JWT ID (jti) генерация и уникальность
+- Revocation check по jti в Redis
 
-### Integration Tests / Интеграционные тесты
-- Полный процесс регистрации / registration
-- Процесс подтверждения электронной почты / verification
-- Процесс входа в систему / login
-- Обновления токена / Token refresh
-- Процесс выхода из системы / logout
-- Ограничение запросов / Rate limiting
-- **Auto-refresh access token при истечении (safe methods)**
-- **Revocation по jti (logout и истечение срока)**
-- **Edge case: Refresh token истек в момент запроса refresh**
-- **Edge case: Access token истек в момент refresh (должен вернуть 401)**
-- **Edge case: Использованный refresh token (reuse attack)**
+### Интеграционные тесты
+- Полный процесс регистрации
+- Процесс подтверждения электронной почты
+- Процесс входа в систему
+- Обновления токена
+- Процесс выхода из системы
+- Ограничение запросов (rate limiting)
+- Auto-refresh access token при истечении (safe methods)
+- Revocation по jti (logout и истечение срока)
+- Edge case: Refresh token истек в момент запроса refresh
+- Edge case: Access token истек в момент refresh (должен вернуть 401)
+- Edge case: Использованный refresh token (reuse attack)
 
-### E2E Tests / E2E тесты
+### E2E тесты
 - Фреймворки: Cypress / Playwright
 - Проверка UI (если есть)
-- **Security Scenarios:**
-  - **XSS: Ввод вредоносного JS в поля name/email/password, проверка экранирования**
-  - **SQLi: Injection в email (e.g. `' OR 1=1 --`)**
-  - **Header injection в User-Agent**
-  - **CSRF: Проверка отсутствия токена в заголовках**
-  - **Token leakage: Проверка, что токены не попадают в console.log и network logs**
-  - **Session fixation: Проверка смены jti при refresh**
+- Security Scenarios:
+  - XSS: Ввод вредоносного JS в поля name/email/password, проверка экранирования
+  - SQLi: Injection в email (e.g. `' OR 1=1 --`)
+  - Header injection в User-Agent
+  - CSRF: Проверка отсутствия токена в заголовках
+  - Token leakage: Проверка, что токены не попадают в console.log и network logs
+  - Session fixation: Проверка смены jti при refresh
