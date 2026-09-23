@@ -133,7 +133,7 @@
                                     └─────────────────────┘
 ```
 
-### Token Refresh / Refresh токена
+### Token Refresh / Обновление токена
 
 ```
 ┌──────────┐    1. POST /refresh     ┌──────────────────┐
@@ -211,7 +211,7 @@
   "email": "user@example.com",
   "name": "Иван Иванов",
   "role": "user",             // "user" | "admin"
-  "is_email_verified": true,
+  "is_email_verified": true,  // флаг подтверждения email (обновляется при /v1/auth/verify)
   "auth_time": 1726989600,    // authentication time (unix timestamp)
   "iat": 1726989600,          // issued at (unix timestamp)
   "exp": 1726991400           // expires at (unix timestamp)
@@ -222,6 +222,11 @@
 **Алгоритм:** RS256  
 **Ключ:** Приватный ключ хранится в переменной окружения `JWT_PRIVATE_KEY` (PEM format)  
 **Верификация:** Публичный ключ доступен через `/.well-known/jwks.json` или из `JWT_PUBLIC_KEY`
+
+**Обновление `is_email_verified`:**
+- Значение берётся из `users.is_email_verified` в момент создания token
+- После `/v1/auth/verify` создаётся **новый** access token с `is_email_verified = true`
+- Старые tokens остаются валидными до истечения срока, но новая сессия будет иметь обновлённое значение
 
 ### 2.3 Handling Expired Access Tokens / Обработка истекших Access Tokens
 
@@ -329,6 +334,11 @@
 - `idx_tokens_user_id` (user_id) — для поиска активных токенов пользователя
 - `idx_tokens_expires_at` (expires_at) — для очистки истекших токенов
 
+**Использование:**
+- При `/v1/auth/verify` токен удаляется из таблицы (одноразовость)
+- Если email уже подтверждён (`is_email_verified = true`), возвращается `409 Conflict`
+- Токен может быть использован только один раз: `DELETE FROM email_verification_tokens WHERE token = ? AND user_id = ? AND used_at IS NULL AND expires_at > NOW()`
+
 ### 3.3 refresh_tokens
 
 | Поле | Тип | Описание |
@@ -361,6 +371,11 @@
 2. При проверке refresh: `WHERE jti = ? AND revoked = FALSE AND expires_at > NOW() AND ip_address = ? AND user_agent_hash = ?`
 3. Token rotation: при каждом refresh генерируется новый токен с `parent_token_id`, старый помечается как revoked
 4. Очистка: удаление revoked токенов старше N дней (cron-задача)
+
+**Где создаются refresh_tokens:**
+- `/v1/auth/login` — при успешной авторизации
+- `/v1/auth/verify` — при подтверждении email (создаётся **новый** refresh_token, даже если пользователь уже был залогинен)
+- `/v1/auth/refresh` — при обновлении токенов (старый инвалидируется, создаётся новый)
 
 **Индексы:**
 - `idx_refresh_token` (token) — для быстрого поиска (по хэшу)
@@ -564,7 +579,8 @@ curl -X POST https://api.mystore.com/v1/auth/verify \
 **Success Response (200):**
 ```json
 {
-  "access_token": "eyJhbG..."
+  "access_token": "eyJhbG...",
+  "refresh_token": "eyJhbG..."
 }
 ```
 
@@ -582,6 +598,30 @@ curl -X POST https://api.mystore.com/v1/auth/verify \
   "details": {}
 }
 ```
+
+---
+
+**Пояснение: Почему возвращается два токена?**
+
+После успешной верификации email возвращаются **оба токена** (`access_token` и `refresh_token`) по следующим причинам:
+
+1. **Непрерывность сессии** — пользователь, который только что подтвердил email, должен продолжать работать без повторного логина. Если возвращать только `access_token`, то через 30 минут (срок его жизни) пользователю придётся логиниться заново, что создаёт плохой UX.
+
+2. **Единообразие flow'ев** — верификация email — это завершение процесса регистрации, а не отдельный endpoint. Логически она должна выдавать те же токены, что и `/v1/auth/login`, чтобы клиент мог работать с API без дополнительных условий.
+
+3. **Безопасность refresh token** — `refresh_token` передаётся как **HTTP-only cookie** (как при login), что защищает его от XSS-атак. Возвращение только `access_token` в response body было бы неполноценным решением.
+
+4. **Token rotation** — при каждом `/v1/auth/verify` генерируется **новый refresh token**, старый (если был) инвалидируется. Это повышает безопасность: даже если токен скомпрометирован, его можно быстро отозвать.
+
+5. **Поддержка off-session verify** — пользователь может подтвердить email в другом браузере или устройстве (через ссылку из email). В этом случае у него может не быть активной сессии, поэтому необходима возможность получить свежие токены.
+
+**Алгоритм работы:**
+1. Верифицируется `email_verification_token`
+2. Обновляется `users.is_email_verified = true`, `users.email_verified_at = NOW()`
+3. Генерируется новый `access_token` (30 мин) и `refresh_token` (7 дней)
+4. `refresh_token` сохраняется в БД (хэш) и устанавливается как HTTP-only cookie
+5. `email_verification_token` помечается как использованный (удаляется)
+6. Возвращаются оба токена в response body (для double-submit cookie pattern или клиентских целей)
 
 ---
 
@@ -1130,6 +1170,24 @@ curl -X DELETE https://api.mystore.com/v1/auth/me \
 - Избегать раннего выхода из функций сравнения
 
 ### 5.4 Email Security / Безопасность email
+
+**Email Verification Token:**
+- Срок жизни: 24 часа
+- Одноразовость: после использования токен удаляется из таблицы `email_verification_tokens`
+- Проверка дублирования: если `is_email_verified = true`, возвращается `409 Conflict`
+- Токен генерируется как URL-safe base64 UUID (без хэширования, так как токен короткий и имеет высокую энтропию)
+
+**Security Considerations for /v1/auth/verify:**
+- При verify создаётся **новый refresh_token** (даже если пользователь уже был залогинен) — это обеспечивает непрерывность сессии
+- Если verify выполняется в другом браузере/устройстве (не там, где был login), создаётся **новая сессия** с новым refresh_token
+- Token binding (IP + user_agent_hash) **не применяется** к verify, так как пользователь может подтвердить email из любого устройства
+- Rate limiting: 10 запросов в час, с 30-минутной блокировкой при превышении
+
+**Why return refresh_token after verify?**
+1. **User Experience:** Пользователь, который только что подтвердил email, должен продолжать работать без повторного логина
+2. **Consistency:** Verify — это завершение регистрации, а не отдельный endpoint. Логически он должен выдавать те же токены, что и login
+3. **Security:** Refresh token в HTTP-only cookie защищён от XSS. Возвращение только access_token в response body было бы неполноценным решением
+4. **Token Rotation:** При verify генерируется новый refresh_token, старый (если был) инвалидируется — это повышает безопасность
 
 - **Verification tokens:** URL-safe base64 UUID, TTL = 24 часа (см. 3.2 email_verification_tokens)
 - **Reset tokens:** UUIDv7, TTL = 1 час (см. 3.4 reset_password_tokens)
