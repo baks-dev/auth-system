@@ -99,7 +99,7 @@ sequenceDiagram
             A->>PG: INSERT INTO refresh_tokens
             G-->>C: 200 OK
             note right of C: {"access_token": "..."}
-            G->>C: Set-Cookie: refresh_token=...
+            G->>C: Set-Cookie header
         else User not found / wrong password
             A->>A: timing-safe dummy check
             G-->>C: 401 Unauthorized
@@ -122,7 +122,7 @@ sequenceDiagram
     participant PG as PostgreSQL
 
     C->>G: POST /v1/auth/refresh
-    note right of C: refresh_token in HTTP-only cookie
+    note right of C: refresh_token в cookie
     G->>R: check rate limit (IP)
     R-->>G: allowed / blocked
     alt Rate limit ok
@@ -140,10 +140,10 @@ sequenceDiagram
                     A->>PG: UPDATE refresh_tokens SET revoked = TRUE
                     A->>A: generate new access token
                     A->>A: generate new refresh token
-                    A->>PG: INSERT INTO refresh_tokens (parent_token_id = old_id)
+                    A->>PG: INSERT INTO refresh_tokens
                     G-->>C: 200 OK
                     note right of C: {"access_token": "..."}
-                    G->>C: Set-Cookie: refresh_token=...
+                    G->>C: Set-Cookie header
                 else Token binding failed
                     G-->>C: 401 Unauthorized
                 end
@@ -171,7 +171,7 @@ sequenceDiagram
     participant PG as PostgreSQL
 
     C->>G: POST /v1/auth/logout
-    note right of C: access_token in Authorization header<br/>refresh_token in cookie
+    note right of C: access_token в заголовке<br/>refresh_token в cookie
     G->>R: check rate limit (IP)
     R-->>G: allowed / blocked
     alt Rate limit ok
@@ -183,8 +183,8 @@ sequenceDiagram
                 A->>A: verify signature (RS256)
                 alt Signature valid
                     A->>R: SET revoked_tokens:{hash}
-                    A->>PG: UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW()
-                    G->>C: Set-Cookie: refresh_token=; Max-Age=0
+                    A->>PG: UPDATE refresh_tokens SET revoked = TRUE
+                    G->>C: Clear refresh cookie
                     G-->>C: 200 OK
                     note right of C: {"message": "..."}
                 else Signature invalid
