@@ -15,10 +15,11 @@
 
 ```json
 {
-  "iss": "mystore-auth-service", // идентификатор сервиса
-  "sub": "uuid-v7", // ID пользователя (time-based)
-  "iat": 1726989600, // время выдачи (Unix timestamp)
-  "exp": 1726991400 // время истечения (Unix timestamp, 30 минут)
+  "iss": "mystore-auth-service",
+  "sub": "uuid-v7",
+  "iat": 1726989600,
+  "exp": 1726991400,
+  "jti": "uuid-v7"
 }
 ```
 
@@ -27,26 +28,57 @@
 **Ключ:** Приватный ключ хранится в переменной окружения `JWT_PRIVATE_KEY` (формат PEM)  
 **Верификация:** Публичный ключ доступен через `/.well-known/jwks.json` или из `JWT_PUBLIC_KEY`
 
-**Пояснение для `iss` (issuer):** Идентификатор сервиса используется при валидации токена для подтверждения, что токен выдан доверенным авторизационным сервером, а не подделан. При проверке подписи также проверяется, что значение `iss` в токене совпадает с ожидаемым идентификатором сервиса.
+### Структура payload
 
-## Проверка `iss` при валидации access token
+| Клайм | Тип | Описание |
+|-------|-----|----------|
+| `iss` | string | Идентификатор сервиса (`mystore-auth-service`) |
+| `sub` | string | ID пользователя (UUIDv7, time-based) |
+| `iat` | number | Время выдачи (Unix timestamp) |
+| `exp` | number | Время истечения (Unix timestamp, +30 минут от iat) |
+| `jti` | string | Unique JWT ID (UUIDv7 для отслеживания отозванных токенов) |
+
+---
+
+## 2.2 Проверка `iss` при валидации access token
 
 **Ожидаемое значение:** `mystore-auth-service`
 
 **Процесс проверки:**
 
-1. **Декодирование JWT** — access token декодируется без проверки подписи (header + payload в base64url)
-2. **Проверка `iss`** — значение поля `iss` сравнивается с ожидаемым `mystore-auth-service`
-3. **Проверка подписи** — если `iss` валиден, выполняется проверка RS256 подписи с помощью публичного ключа
-4. **Проверка `exp`** — проверка срока действия токена
+```mermaid
+sequenceDiagram
+    participant T as Token
+    participant D as Decoder
+    participant I as Issuer Check
+    participant V as Verify Signature
+    participant E as Exp Check
+    participant R as Response
 
-**Что происходит при несовпадении `iss`:**
+    T->>D: Decode (base64url)
+    D->>I: Extract iss
+    I->>I: Compare with<br/>mystore-auth-service
+    alt Issuer valid
+        I->>V: Verify RS256 signature
+        V->>E: Check exp claim
+        alt Not expired
+            E->>R: Valid token
+        else Expired
+            R-->>T: 401 ACCESS_TOKEN_INVALID
+        end
+    else Issuer invalid
+        R-->>T: 401 ACCESS_TOKEN_INVALID
+    end
+```
+
+### Что происходит при несовпадении `iss`:
+
 - Если `iss` не равен `mystore-auth-service`, токен отклоняется с ошибкой `401 Unauthorized`
 - Код ошибки: `ACCESS_TOKEN_INVALID`
 - Сообщение: "Неверный или истекший токен доступа"
 - **Важно:** Ошибка не раскрывает детали (не указывает, что именно `iss` не совпал) — это предотвращает information disclosure
 
-**Псевдокод валидации access token:**
+### Псевдокод валидации access token:
 
 ```javascript
 function validateAccessToken(token) {
@@ -80,27 +112,47 @@ function validateAccessToken(token) {
 
 **Примечание:** Email и имя не включаются в access token, так как payload JWT не шифруется, а профиль может измениться за время жизни токена. Профиль клиент получает через `GET /v1/users/me`.
 
+---
+
 ## 2.3 Обработка истекших токенов доступа
 
 **Стратегия:** Token refresh (авто-обновление) при истечении в середине запроса
 
+```mermaid
+stateDiagram-v2
+    [*] --> Valid
+
+    Valid --> AutoRefresh: exp - now <= 5s<br/>safe method (GET/HEAD/OPTIONS)
+    Valid --> RequestFailed: exp - now < 0<br/>unsafe method (POST/PUT/DELETE)
+
+    AutoRefresh --> Valid: New access token generated<br/>X-Token-Refresh: true
+    RequestFailed --> Expired: 401 Unauthorized<br/>X-Token-Status: expired
+
+    Expired --> Revoked: Client performs refresh flow
+    Revoked --> [*]
+```
+
+### Поведение по времени до истечения
+
 | Время до exp                | Действие                                                  | Ответ                                                  |
-| --------------------------- | --------------------------------------------------------- | ------------------------------------------------------ |
+|---------------------------|-----------------------------------------------------------|--------------------------------------------------------|
 | `exp - now > 5s`            | Обычный запрос                                            | 200 OK                                                 |
 | `exp - now <= 5s`           | Авто-обновление (только safe methods: GET, HEAD, OPTIONS) | 200 OK + заголовок `X-Token-Refresh: true`             |
 | `exp - now < 0` (просрочен) | Требуется refresh                                         | 401 Unauthorized + заголовок `X-Token-Status: expired` |
 
-**Правила:**
+### Правила:
 
 - **Safe methods (GET, HEAD, OPTIONS):** Автоматически обновляют access token через refresh, если истек менее 5 секунд назад
 - **Unsafe methods (POST, PUT, DELETE):** Возвращают 401 без авто-обновления
 - **Header:** При авто-обновлении добавляется `X-Token-Refresh: true` для информирования клиента
 - **Логирование:** Все авто-обновления логируются с `event: token.autorefresh`
 
-**Рекомендация для клиентов:**
+### Рекомендация для клиентов:
 
 - При получении 401 с `X-Token-Status: expired` выполнить flow refresh token
 - При `X-Token-Refresh: true` можно продолжить работу (token обновлён прозрачно)
+
+---
 
 ## 2.4 Токен обновления
 
@@ -117,10 +169,11 @@ function validateAccessToken(token) {
 
 ```json
 {
-  "iss": "mystore-auth-service", // идентификатор сервиса
-  "sub": "uuid-v7", // ID пользователя
-  "iat": 1726989600, // время выдачи (Unix timestamp)
-  "exp": 1727076000 // время истечения (Unix timestamp, 7 дней)
+  "iss": "mystore-auth-service",
+  "sub": "uuid-v7",
+  "iat": 1726989600,
+  "exp": 1727076000,
+  "jti": "uuid-v7"
 }
 ```
 
@@ -130,7 +183,34 @@ function validateAccessToken(token) {
 **Rotation:** При каждом refresh генерируется новый refresh token, старый инвалидируется (одноразовость)  
 **Revocation:** `jti` добавляется в Redis blacklist с TTL = оставшееся время жизни
 
-**Пояснение для `iss` (issuer):** То же, что и для access token — подтверждение, что токен выдан доверенным авторизационным сервером.
+### Структура payload
+
+| Клайм | Тип | Описание |
+|-------|-----|----------|
+| `iss` | string | Идентификатор сервиса |
+| `sub` | string | ID пользователя |
+| `iat` | number | Время выдачи |
+| `exp` | number | Время истечения (+7 дней от iat) |
+| `jti` | string | Unique JWT ID для revocation |
+
+### Жизненный цикл refresh token
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created: /login, /verify
+
+    Created --> Active: Token saved to DB<br/>HTTP-only cookie set
+
+    Active --> Active: /refresh<br/>Rotation: old revoked, new created
+
+    Active --> Revoked: /logout<br/>revoked = TRUE in DB
+
+    Active --> Expired: Срок жизни истек<br/>(7 дней)
+
+    Revoked --> [*]: Удален из БД<br/>(cron-задача после N дней)
+
+    Expired --> [*]: Удален из БД
+```
 
 ---
 
@@ -138,12 +218,32 @@ function validateAccessToken(token) {
 
 **Архитектура хранения:**
 
+```mermaid
+flowchart LR
+    subgraph Client["Браузер (Клиент)"]
+        LS[localStorage<br/><small>XSS уязвим</small>]
+        HT[HTTP-only cookie<br/><small>XSS защищён</small>]
+    end
+
+    subgraph Server["Сервер"]
+        DB[(PostgreSQL<br/>refresh_tokens)]
+        RB[Redis<br/>Blacklist]
+    end
+
+    LS -.->|Украсть токен| Attacker["Атакующий"]
+    HT -.->|Недоступен| Attacker
+
+    DB -->|Хэш токена| RB
+```
+
+### Сравнение хранения токенов
+
 | Токен | Место хранения | Доступ | Безопасность |
 |-------|----------------|--------|--------------|
 | Access token | Response body (JSON) | JS-доступ | XSS уязвим |
 | Refresh token | HTTP-only cookie | Недоступен JS | XSS защищён |
 
-**Настройка cookie:**
+### Настройка cookie:
 
 ```javascript
 // Пример установки cookie сервером
@@ -157,25 +257,40 @@ res.cookie('refresh_token', refreshTokenValue, {
 });
 ```
 
-**Как работает flow:**
+### Как работает flow:
 
-1. **При login/verify:** Сервер устанавливает refresh token в HTTP-only cookie
-2. **При refresh/logout:** Браузер автоматически отправляет cookie с каждым запросом
-3. **При logout:** Сервер инвалидирует токен и может очистить cookie (через `Set-Cookie: refresh_token=; Max-Age=0`)
+```mermaid
+sequenceDiagram
+    participant C as Клиент
+    participant S as Сервер
 
-**Преимущества HTTP-only cookie:**
+    C->>S: POST /login
+    S->>S: Generate tokens
+    S->>C: 200 OK
+    S-->>C: Set-Cookie: refresh_token=...
+    note right of C: Cookie хранится<br/>автоматически
+
+    C->>S: POST /refresh
+    note right of C: Cookie отправляется<br/>автоматически
+    S->>S: Check cookie + DB
+    S->>S: Generate new tokens
+    S->>C: 200 OK
+    S-->>C: Set-Cookie: refresh_token=... (new)
+```
+
+### Преимущества HTTP-only cookie:
 
 - **XSS защита:** JavaScript не может прочитать или украсть refresh token
 - **Автоматическая отправка:** Браузер сам добавляет cookie к запросам (не нужно хранить в localStorage/Redux)
 - **SameSite protection:** `SameSite=Strict` предотвращает отправку cookie при cross-site запросах
 
-**Ограничения:**
+### Ограничения:
 
 - **Domain ограничение:** Cookie отправляется только на `api.mystore.com` (или поддомены с `domain=.mystore.com`)
 - **HTTPS рекомендация:** `Secure` флаг требует HTTPS в production
 - **CSRF защита:** SameSite=Strict предотвращает большинство CSRF атак, но для критичных операций может потребоваться дополнительная защита (CSRF token)
 
-**Клиентская логика:**
+### Клиентская логика:
 
 ```javascript
 // При login - сервер устанавливает cookie
@@ -197,4 +312,56 @@ fetch('/v1/auth/logout', {
   method: 'POST',
   credentials: 'include'
 });
+```
+
+---
+
+## 2.6 Пример JWT токена
+
+### Структура JWT
+
+JWT состоит из трёх частей, разделённых точкой: `header.payload.signature`
+
+#### Пример (декодированный):
+
+```
+[HEADER]
+{
+  "alg": "RS256",
+  "typ": "JWT"
+}
+
+[PAYLOAD]
+{
+  "iss": "mystore-auth-service",
+  "sub": "01hv...",
+  "iat": 1726989600,
+  "exp": 1726991400,
+  "jti": "01hv..."
+}
+
+[SIGNATURE]
+RS256(SIGNING-KEY, [HEADER].[PAYLOAD])
+```
+
+#### Полный токен (base64url encoded):
+
+```
+eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJteXN0b3JlLWF1dGgtc2VydmljZSIsInN1YiI6IjAxaHYuLi4iLCJpYXQiOjE3MjY5ODk2MDAsImV4cCI6MTcyNjk5MTQwMCwianRpIjoiMDFodi4uLiJ9.SIGNATURE_HERE
+```
+
+### Декодирование payload (Node.js):
+
+```javascript
+function decodeJwtPayload(token) {
+  const base64Url = token.split('.')[1];
+  const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+  const payload = JSON.parse(atob(base64));
+  return payload;
+}
+
+// Использование
+const payload = decodeJwtPayload(accessToken);
+console.log(payload.sub);  // user id
+console.log(payload.exp);  // expiration timestamp
 ```
