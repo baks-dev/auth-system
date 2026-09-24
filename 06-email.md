@@ -1,5 +1,7 @@
 # 6. Интеграция email
 
+**Обзор:** Документ описывает настройку SMTP-клиента, шаблоны email-писем для системы авторизации и очередь email-сообщений для высоконагруженных систем.
+
 ## 6.1 Клиент SMTP
 
 **Library:** Nodemailer (Node.js) / SendGrid / AWS SES (production)
@@ -28,6 +30,14 @@
 - Retry logic (3 attempts, exponential backoff)
 - Queue system (BullMQ) для высокой нагрузки
 - Bounce detection и handling
+
+## 6.2 Шаблоны email-писем
+
+| Тип письма | Назначение | Срок действия | Template variables |
+|------------|------------|---------------|-------------------|
+| Verification | Подтверждение email при регистрации | 24 часа | name, token, unsubscribe_token |
+| Password Reset | Сброс пароля по запросу | 1 час | email, token, unsubscribe_token |
+| Unsubscribe | Отписка от рассылки | Постоянный | email, unsubscribe_token |
 
 ## 6.2 Шаблон: Подтверждение регистрации
 
@@ -102,14 +112,22 @@ https://mystore.com/unsubscribe?token={unsubscribe_token}
 
 **Worker configuration:**
 
-```javascript
-{
-  concurrency: 10,        // параллельные воркеры
-  attempts: 3,            // повтор при ошибке
-  delay: 5000,            // 5 сек задержка между повторами
-  backoff: 'exponential'  // экспоненциальная задержка
-}
-```
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| `concurrency` | 10 | Параллельные воркеры (одновременных писем) |
+| `attempts` | 3 | Повтор при ошибке |
+| `delay` | 5000 мс | Задержка между повторами |
+| `backoff` | exponential | Экспоненциальная задержка между попытками |
+
+**Job lifecycle:**
+1. Job создается в очереди с типом `verification`/`password_reset`/`unsubscribe`/`notification`
+2. Worker забирает job из очереди
+3. Формируется email на основе шаблона
+4. Письмо отправляется через SMTP-клиент
+5. При успехе job удаляется из очереди
+6. При неудаче (3 попытки) job перемещается в "dead letter queue" для анализа
+
+---
 
 ## 6.5 Переменные окружения
 
@@ -130,4 +148,26 @@ APP_UNSUBSCRIBE_URL=https://mystore.com/unsubscribe
 # Email Queue (BullMQ)
 REDIS_URL=redis://localhost:6379
 EMAIL_QUEUE_PREFIX=emails
+```
+
+---
+
+## 6.6 Безопасность email
+
+**Защита от спама и фишинга:**
+
+| Механизм | Описание |
+|----------|----------|
+| SPF (Sender Policy Framework) | DNS-запись разрешает отправку с конкретных серверов |
+| DKIM (DomainKeys Identified Mail) | Подпись писем приватным ключом домена |
+| DMARC (Domain-based Message Authentication) | Политика обработки неавторизованных писем |
+| TLS 1.3+ | Шифрование соединения с SMTP-сервером |
+| No personal data | В письмах только необходимые данные (email, token) |
+| One-time tokens | Токены одноразовые и имеют ограниченный срок действия |
+
+**Рекомендации:**
+- Использовать отдельный домен для noreply@ (например, noreply@mystore.com)
+- Настроить SPF, DKIM, DMARC в DNS провайдера
+- Логировать все попытки отправки (успех/ошибка)
+- Не отправлять пароли в письмах (только ссылки для сброса)
 ```
