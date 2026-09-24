@@ -97,6 +97,19 @@ Authorization: Bearer <access_token>
 
 **Описание:** Регистрация нового пользователя
 
+**Нормализация email:**
+- Пробелы по краям строки удаляются
+- Строка приводится к нижнему регистру
+- Другой нормализации нет: точки (`.`) и часть после символа `+` сохраняются
+- Email хранится в нормализованном виде в базе данных
+
+**Пример:**
+- Ввод: `"  Ivan.Ivanov+test@Example.COM  "`
+- Нормализованный email: `"ivan.ivanov+test@example.com"`
+
+**Описание схемы:**
+Схема показывает процесс регистрации пользователя. Клиент отправляет POST-запрос на `/v1/auth/register`. API Gateway проверяет rate limit по комбинации IP и email. При успешной проверке Auth Service нормализует email (удаляет пробелы, приводит к нижнему регистру), валидирует входные данные и хеширует пароль с помощью Argon2id. Затем создается запись пользователя в PostgreSQL и генерируется одноразовый токен для подтверждения email. После этого отправляется письмо с ссылкой для верификации через SMTP-сервер. Клиент получает ответ 201 Created. При превышении rate limit возвращается 429 Too Many Requests.
+
 **Схема:**
 ```mermaid
 sequenceDiagram
@@ -155,9 +168,49 @@ sequenceDiagram
 
 | Код | Описание | Пример |
 |-----|----------|--------|
-| `400 VALIDATION_ERROR` | Ошибка валидации данных | `{"error": {"code": "VALIDATION_ERROR", "message": "...", "fields": [...]}}` |
+| `400 VALIDATION_ERROR` | Ошибка валидации данных | `{"error": {"code": "VALIDATION_ERROR", "message": "..."}}` |
 | `409 EMAIL_ALREADY_REGISTERED` | Email уже зарегистрирован | `{"error": {"code": "EMAIL_ALREADY_REGISTERED", "message": "..."}}` |
-| `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "...", "details": {"retry_after": 3600}}}` |
+| `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "..."}}` |
+
+**Response 400 Bad Request (VALIDATION_ERROR):**
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Ошибка валидации данных",
+    "fields": [
+      { "field": "email", "code": "INVALID_FORMAT" },
+      { "field": "password", "code": "TOO_SHORT" },
+      { "field": "name", "code": "REQUIRED" }
+    ]
+  }
+}
+```
+
+**Response 409 Conflict (EMAIL_ALREADY_REGISTERED):**
+
+```json
+{
+  "error": {
+    "code": "EMAIL_ALREADY_REGISTERED",
+    "message": "Пользователь с этим email уже существует",
+    "details": {}
+  }
+}
+```
+
+**Response 429 Too Many Requests (RATE_LIMITED):**
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Превышен лимит запросов",
+    "details": { "retry_after": 3600 }
+  }
+}
+```
 
 **Пример curl:**
 
@@ -176,6 +229,9 @@ curl -X POST https://api.mystore.com/v1/auth/register \
 ## 4.3 POST /v1/auth/verify
 
 **Описание:** Подтверждение email с одноразовым токеном
+
+**Описание схемы:**
+Схема показывает процесс подтверждения email с одноразовым токеном. Клиент отправляет POST-запрос на `/v1/auth/verify` с токеном. API Gateway проверяет rate limit по IP. Auth Service ищет токен в PostgreSQL. Если токен найден и не истек, обновляется флаг `is_email_verified`, удаляется токен, и генерируются новые access token и refresh token (для непрерывности сессии). При истёкшем или не найденном токене возвращается 400 CONFIRMATION_TOKEN_INVALID. При превышении rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -229,6 +285,30 @@ sequenceDiagram
 | `400 CONFIRMATION_TOKEN_INVALID` | Неверный или истекший токен | `{"error": {"code": "CONFIRMATION_TOKEN_INVALID", "message": "..."}}` |
 | `409 EMAIL_ALREADY_CONFIRMED` | Email уже подтверждён | `{"error": {"code": "EMAIL_ALREADY_CONFIRMED", "message": "..."}}` |
 
+**Response 400 Bad Request (CONFIRMATION_TOKEN_INVALID):**
+
+```json
+{
+  "error": {
+    "code": "CONFIRMATION_TOKEN_INVALID",
+    "message": "Неверный или истёкший токен подтверждения",
+    "details": {}
+  }
+}
+```
+
+**Response 409 Conflict (EMAIL_ALREADY_CONFIRMED):**
+
+```json
+{
+  "error": {
+    "code": "EMAIL_ALREADY_CONFIRMED",
+    "message": "Email уже подтверждён",
+    "details": {}
+  }
+}
+```
+
 **Пояснение: Почему возвращаются два токена?**
 
 После успешной верификации email возвращаются **оба токена** (`access_token` и `refresh_token`) по следующим причинам:
@@ -254,6 +334,9 @@ curl -X POST https://api.mystore.com/v1/auth/verify \
 ## 4.4 POST /v1/auth/login
 
 **Описание:** Авторизация пользователя
+
+**Описание схемы:**
+Схема показывает процесс авторизации пользователя. Клиент отправляет POST-запрос на `/v1/auth/login`. API Gateway проверяет rate limit по IP и email. При успешной проверке Auth Service ищет пользователя в PostgreSQL по email. Если пользователь найден, происходит верификация пароля с помощью Argon2id (timing-safe сравнение). При успешной верификации создается сессия в Redis, генерируются access token (30 минут) и refresh token (7 дней), который сохраняется в PostgreSQL и устанавливается как HTTP-only cookie. При неверных данных или несуществующем пользователе возвращается 401 Unauthorized (с timing-safe dummy check чтобы не раскрывать наличие пользователя). При превышении rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -312,6 +395,42 @@ sequenceDiagram
 | `403 EMAIL_NOT_CONFIRMED` | Email не подтверждён | `{"error": {"code": "EMAIL_NOT_CONFIRMED", "message": "..."}}` |
 | `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "..."}}` |
 
+**Response 401 Unauthorized (INVALID_CREDENTIALS):**
+
+```json
+{
+  "error": {
+    "code": "INVALID_CREDENTIALS",
+    "message": "Неверные учётные данные",
+    "details": {}
+  }
+}
+```
+
+**Response 403 Forbidden (EMAIL_NOT_CONFIRMED):**
+
+```json
+{
+  "error": {
+    "code": "EMAIL_NOT_CONFIRMED",
+    "message": "Пожалуйста, подтвердите ваш email",
+    "details": {}
+  }
+}
+```
+
+**Response 429 Too Many Requests (RATE_LIMITED):**
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Превышен лимит запросов",
+    "details": { "retry_after": 3600 }
+  }
+}
+```
+
 **Пример curl:**
 
 ```bash
@@ -328,6 +447,9 @@ curl -X POST https://api.mystore.com/v1/auth/login \
 ## 4.5 POST /v1/auth/refresh
 
 **Описание:** Получение нового access token с rotation refresh token
+
+**Описание схемы:**
+Схема показывает процесс обновления access token с rotation refresh token. Клиент отправляет POST-запрос на `/v1/auth/refresh`, передавая access token в заголовке Authorization и refresh token как HTTP-only cookie. API Gateway проверяет rate limit по IP. Auth Service сначала проверяет, не находится ли токен в черном списке (Redis). Если токен активен, выполняется валидация: проверка подписи RS256, срок действия, привязка к IP-адресу и user agent hash. При успешной проверке старый токен помещается в черный список с TTL = оставшееся время жизни, помечается как revoked в БД, генерируются новые access token и refresh token (rotation). При несоответствии параметров привязки или истечении срока возвращается 401 Unauthorized. При превышении rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -400,6 +522,30 @@ Authorization: Bearer <access_token>
 | `401 REFRESH_TOKEN_INVALID` | Неверный или истекший токен обновления | `{"error": {"code": "REFRESH_TOKEN_INVALID", "message": "..."}}` |
 | `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "..."}}` |
 
+**Response 401 Unauthorized (REFRESH_TOKEN_INVALID):**
+
+```json
+{
+  "error": {
+    "code": "REFRESH_TOKEN_INVALID",
+    "message": "Неверный или истёкший токен обновления",
+    "details": {}
+  }
+}
+```
+
+**Response 429 Too Many Requests (RATE_LIMITED):**
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Превышен лимит запросов",
+    "details": { "retry_after": 3600 }
+  }
+}
+```
+
 **Пример curl:**
 
 ```bash
@@ -416,6 +562,9 @@ curl -X POST https://api.mystore.com/v1/auth/refresh \
 **Описание:** Выход из системы (инвалидация refresh token текущей сессии)
 
 > **Важно:** Logout завершает **только текущую сессию**. В других браузерах или устройствах пользователь остаётся в системе.
+
+**Описание схемы:**
+Схема показывает процесс выхода из системы (инвалидация refresh token текущей сессии). Клиент отправляет POST-запрос на `/v1/auth/logout`, передавая access token в заголовке Authorization и refresh token как HTTP-only cookie. API Gateway проверяет rate limit по IP. Auth Service проверяет, не был ли токен уже отозван. При активном токене он добавляется в черный список Redis с TTL = 604800 секунд (7 дней), а запись в PostgreSQL помечается как revoked. HTTP-only cookie очищается через `Set-Cookie: refresh_token=; Max-Age=0`. Важно: logout инвалидирует только текущую сессию — другие активные сессии остаются действительными. При повторном вызове logout для уже отозванного токена возвращается 200 OK (idempotent). При превышении rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -438,7 +587,7 @@ sequenceDiagram
             alt Token valid
                 A->>R: SET revoked_tokens:{hash} EX 604800
                 A->>PG: UPDATE refresh_tokens SET revoked = TRUE
-                G->>C: Set-Cookie: refresh_token=; Max-Age=0
+                G->>C: Clear refresh cookie (Max-Age=0)
                 G-->>C: 200 OK
             else Token invalid
                 G-->>C: 401 Unauthorized
@@ -471,11 +620,23 @@ Authorization: Bearer <access_token>
 |-----|----------|--------|
 | `401 ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа | `{"error": {"code": "ACCESS_TOKEN_INVALID", "message": "..."}}` |
 
+**Response 401 Unauthorized (ACCESS_TOKEN_INVALID):**
+
+```json
+{
+  "error": {
+    "code": "ACCESS_TOKEN_INVALID",
+    "message": "Неверный или истёкший токен доступа",
+    "details": {}
+  }
+}
+```
+
 **Как работает logout:**
 
 1. Инвалидирует текущий refresh token (`revoked = TRUE`)
 2. Добавляет `jti` в Redis blacklist с TTL = оставшееся время жизни
-3. Очищает cookie (`Set-Cookie: refresh_token=; Max-Age=0`)
+3. Очищает cookie через `Set-Cookie: refresh_token=; Max-Age=0`
 4. **Не инвалидирует другие активные сессии**
 
 **Access token после logout:**
@@ -494,6 +655,9 @@ curl -X POST https://api.mystore.com/v1/auth/logout \
 ## 4.7 GET /v1/auth/me
 
 **Описание:** Получение данных текущего пользователя
+
+**Описание схемы:**
+Схема показывает процесс получения данных текущего пользователя. Клиент отправляет GET-запрос на `/v1/auth/me`, передавая access token в заголовке Authorization. API Gateway или Auth Service валидирует токен (проверка подписи RS256 и срока действия). При валидном токене из PostgreSQL извлекаются данные пользователя (id, email, name, role, флаг верификации, created_at) и возвращаются клиенту. При невалидном токене возвращается 401 Unauthorized.
 
 **Схема:**
 ```mermaid
@@ -540,6 +704,18 @@ Authorization: Bearer <access_token>
 |-----|----------|--------|
 | `401 ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа | `{"error": {"code": "ACCESS_TOKEN_INVALID", "message": "..."}}` |
 
+**Response 401 Unauthorized (ACCESS_TOKEN_INVALID):**
+
+```json
+{
+  "error": {
+    "code": "ACCESS_TOKEN_INVALID",
+    "message": "Неверный или истёкший токен доступа",
+    "details": {}
+  }
+}
+```
+
 **Пример curl:**
 
 ```bash
@@ -552,6 +728,9 @@ curl https://api.mystore.com/v1/auth/me \
 ## 4.8 POST /v1/auth/resend-verification
 
 **Описание:** Повторная отправка email с подтверждением
+
+**Описание схемы:**
+Схема показывает процесс повторной отправки email с подтверждением. Клиент отправляет POST-запрос на `/v1/auth/resend-verification` с email. API Gateway проверяет rate limit по IP. Auth Service ищет пользователя по email. Если пользователь существует, проверяется наличие pending токена. Если есть pending токен и за последний час отправлено менее 3 писем, старые токены аннулируются, выпускается новый и отправляется email. Если pending токена нет, создается новый токен и отправляется email. Если пользователь не найден, возвращается 200 OK (но письмо не отправляется для безопасности). При превышении лимита 3 писем за час — 429 RATE_LIMITED. При превышении общего rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -612,10 +791,34 @@ sequenceDiagram
 
 **Error Responses:**
 
-| Код | Описание | Пример |
-|-----|----------|--------|
-| `409 EMAIL_ALREADY_VERIFIED` | Email уже подтверждён | `{"error": {"code": "EMAIL_ALREADY_VERIFIED", "message": "..."}}` |
-| `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "..."}}` |
+| Код | Описание |
+|-----|----------|
+| `409 EMAIL_ALREADY_VERIFIED` | Email уже подтверждён |
+| `429 RATE_LIMITED` | Превышен лимит запросов |
+
+**Response 409 Conflict (EMAIL_ALREADY_VERIFIED):**
+
+```json
+{
+  "error": {
+    "code": "EMAIL_ALREADY_VERIFIED",
+    "message": "Email уже подтверждён",
+    "details": {}
+  }
+}
+```
+
+**Response 429 Too Many Requests (RATE_LIMITED):**
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Превышен лимит запросов",
+    "details": { "retry_after": 3600 }
+  }
+}
+```
 
 **Поведение:**
 
@@ -641,6 +844,9 @@ curl -X POST https://api.mystore.com/v1/auth/resend-verification \
 ## 4.9 POST /v1/auth/forgot-password
 
 **Описание:** Запрос на сброс пароля
+
+**Описание схемы:**
+Схема показывает процесс запроса сброса пароля. Клиент отправляет POST-запрос на `/v1/auth/forgot-password`. API Gateway проверяет rate limit по комбинации IP и email. Auth Service ищет пользователя в PostgreSQL по email. Если пользователь найден, генерируется UUIDv7-токен сброса, сохраняется в базе со сроком действия 1 час, и отправляется email со ссылкой для сброса. Если пользователь не найден, выполняется timing-safe dummy операция (чтобы не раскрывать существование аккаунта) и всё равно возвращается 200 OK. Важно: система не раскрывает, существует ли email — это защита от enumeration атак. При превышении rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -693,9 +899,21 @@ sequenceDiagram
 
 **Error Responses:**
 
-| Код | Описание | Пример |
-|-----|----------|--------|
-| `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "...", "details": {"retry_after": 3600}}}` |
+| Код | Описание |
+|-----|----------|
+| `429 RATE_LIMITED` | Превышен лимит запросов |
+
+**Response 429 Too Many Requests (RATE_LIMITED):**
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Превышен лимит запросов",
+    "details": { "retry_after": 3600 }
+  }
+}
+```
 
 **Пример curl:**
 
@@ -712,6 +930,9 @@ curl -X POST https://api.mystore.com/v1/auth/forgot-password \
 ## 4.10 POST /v1/auth/reset-password
 
 **Описание:** Сброс пароля с токеном
+
+**Описание схемы:**
+Схема показывает процесс сброса пароля с использованием токена. Клиент отправляет POST-запрос на `/v1/auth/reset-password` с токеном из email и новым паролем. API Gateway проверяет rate limit по комбинации IP и email. Auth Service ищет токен в базе данных PostgreSQL. Если токен найден и не истёк, пароль хешируется с помощью Argon2id, обновляется в базе, а токен помечается как использованный. Если токен не найден или истёк, возвращается ошибка 400. При превышении rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -760,12 +981,60 @@ sequenceDiagram
 
 **Error Responses:**
 
-| Код | Описание | Пример |
-|-----|----------|--------|
-| `400 INVALID_TOKEN` | Неверный или истекший токен | `{"error": {"code": "INVALID_TOKEN", "message": "..."}}` |
-| `400 EXPIRED_TOKEN` | Токен сброса пароля истёк | `{"error": {"code": "EXPIRED_TOKEN", "message": "..."}}` |
-| `404 TOKEN_NOT_FOUND` | Токен не найден | `{"error": {"code": "TOKEN_NOT_FOUND", "message": "..."}}` |
-| `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "..."}}` |
+| Код | Описание |
+|-----|----------|
+| `400 INVALID_TOKEN` | Неверный или истекший токен |
+| `400 EXPIRED_TOKEN` | Токен сброса пароля истёк |
+| `404 TOKEN_NOT_FOUND` | Токен не найден |
+| `429 RATE_LIMITED` | Превышен лимит запросов |
+
+**Response 400 Bad Request (INVALID_TOKEN):**
+
+```json
+{
+  "error": {
+    "code": "INVALID_TOKEN",
+    "message": "Неверный или истёкший токен сброса пароля",
+    "details": {}
+  }
+}
+```
+
+**Response 400 Bad Request (EXPIRED_TOKEN):**
+
+```json
+{
+  "error": {
+    "code": "EXPIRED_TOKEN",
+    "message": "Токен сброса пароля истёк",
+    "details": {}
+  }
+}
+```
+
+**Response 404 Not Found (TOKEN_NOT_FOUND):**
+
+```json
+{
+  "error": {
+    "code": "TOKEN_NOT_FOUND",
+    "message": "Токен сброса пароля не найден",
+    "details": {}
+  }
+}
+```
+
+**Response 429 Too Many Requests (RATE_LIMITED):**
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Превышен лимит запросов",
+    "details": { "retry_after": 3600 }
+  }
+}
+```
 
 **Пример curl:**
 
@@ -783,6 +1052,9 @@ curl -X POST https://api.mystore.com/v1/auth/reset-password \
 ## 4.11 POST /v1/auth/unsubscribe
 
 **Описание:** Отписка от коммерческой рассылки (GDPR/КоАП)
+
+**Описание схемы:**
+Схема показывает процесс отписки от email-рассылки. Клиент отправляет POST-запрос на `/v1/auth/unsubscribe` с токеном отписки из email. Auth Service ищет пользователя в PostgreSQL по unsubscribe_token. Если пользователь найден, токен обнуляется в базе (удаляется), и возвращается 200 OK. Если пользователь не найден, возвращается 404 USER_NOT_FOUND. Эндпоинт не требует аутентификации — токен является достаточным доказательством прав на отписку.
 
 **Схема:**
 ```mermaid
@@ -822,10 +1094,34 @@ sequenceDiagram
 
 **Error Responses:**
 
-| Код | Описание | Пример |
-|-----|----------|--------|
-| `400 INVALID_TOKEN` | Неверный или истекший токен | `{"error": {"code": "INVALID_TOKEN", "message": "..."}}` |
-| `404 USER_NOT_FOUND` | Пользователь не найден | `{"error": {"code": "USER_NOT_FOUND", "message": "..."}}` |
+| Код | Описание |
+|-----|----------|
+| `400 INVALID_TOKEN` | Неверный или истекший токен |
+| `404 USER_NOT_FOUND` | Пользователь не найден |
+
+**Response 400 Bad Request (INVALID_TOKEN):**
+
+```json
+{
+  "error": {
+    "code": "INVALID_TOKEN",
+    "message": "Неверный или истёкший токен отписки",
+    "details": {}
+  }
+}
+```
+
+**Response 404 Not Found (USER_NOT_FOUND):**
+
+```json
+{
+  "error": {
+    "code": "USER_NOT_FOUND",
+    "message": "Пользователь не найден",
+    "details": {}
+  }
+}
+```
 
 **Пример curl:**
 
@@ -842,6 +1138,9 @@ curl -X POST https://api.mystore.com/v1/auth/unsubscribe \
 ## 4.12 PUT /v1/auth/change-password
 
 **Описание:** Изменение пароля
+
+**Описание схемы:**
+Схема показывает процесс изменения пароля пользователем. Клиент отправляет PUT-запрос на `/v1/auth/change-password` с текущим паролем и новым паролем в теле запроса. Authorization header содержит access token. API Gateway проверяет rate limit по IP. Auth Service валидирует access token, затем проверяет текущий пароль. Если текущий пароль верный, новый пароль хешируется и обновляется в базе. Если текущий пароль неверный, возвращается 400 INVALID_CREDENTIALS. При превышении rate limit — 429 Too Many Requests.
 
 **Схема:**
 ```mermaid
@@ -896,12 +1195,60 @@ Authorization: Bearer <access_token>
 
 **Error Responses:**
 
-| Код | Описание | Пример |
-|-----|----------|--------|
-| `400 INVALID_CREDENTIALS` | Текущий пароль неверный | `{"error": {"code": "INVALID_CREDENTIALS", "message": "..."}}` |
-| `400 WEAK_PASSWORD` | Новый пароль не соответствует требованиям | `{"error": {"code": "WEAK_PASSWORD", "message": "..."}}` |
-| `401 ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа | `{"error": {"code": "ACCESS_TOKEN_INVALID", "message": "..."}}` |
-| `429 RATE_LIMITED` | Превышен лимит запросов | `{"error": {"code": "RATE_LIMITED", "message": "..."}}` |
+| Код | Описание |
+|-----|----------|
+| `400 INVALID_CREDENTIALS` | Текущий пароль неверный |
+| `400 WEAK_PASSWORD` | Новый пароль не соответствует требованиям |
+| `401 ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа |
+| `429 RATE_LIMITED` | Превышен лимит запросов |
+
+**Response 400 Bad Request (INVALID_CREDENTIALS):**
+
+```json
+{
+  "error": {
+    "code": "INVALID_CREDENTIALS",
+    "message": "Текущий пароль неверный",
+    "details": {}
+  }
+}
+```
+
+**Response 400 Bad Request (WEAK_PASSWORD):**
+
+```json
+{
+  "error": {
+    "code": "WEAK_PASSWORD",
+    "message": "Новый пароль не соответствует требованиям безопасности",
+    "details": {}
+  }
+}
+```
+
+**Response 401 Unauthorized (ACCESS_TOKEN_INVALID):**
+
+```json
+{
+  "error": {
+    "code": "ACCESS_TOKEN_INVALID",
+    "message": "Неверный или истёкший токен доступа",
+    "details": {}
+  }
+}
+```
+
+**Response 429 Too Many Requests (RATE_LIMITED):**
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Превышен лимит запросов",
+    "details": { "retry_after": 3600 }
+  }
+}
+```
 
 **Пример curl:**
 
@@ -920,6 +1267,9 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
 ## 4.13 DELETE /v1/auth/me
 
 **Описание:** Удаление аккаунта текущего пользователя (GDPR compliance)
+
+**Описание схемы:**
+Схема показывает процесс полного удаления аккаунта пользователя (GDPR right to be forgotten). Клиент отправляет DELETE-запрос на `/v1/auth/me` с access token в header. API Gateway валидирует токен. Если токен валиден, Auth Service проверяет, подтверждён ли email (обязательное условие для удаления). Если email подтверждён, последовательно удаляются: refresh tokens, email verification tokens, reset password tokens, login attempts и сама запись пользователя из БД. Также очищаются все сессии пользователя в Redis. Если email не подтверждён, возвращается 403 EMAIL_NOT_VERIFIED.
 
 **Схема:**
 ```mermaid
@@ -967,10 +1317,34 @@ Authorization: Bearer <access_token>
 
 **Error Responses:**
 
-| Код | Описание | Пример |
-|-----|----------|--------|
-| `401 ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа | `{"error": {"code": "ACCESS_TOKEN_INVALID", "message": "..."}}` |
-| `403 EMAIL_NOT_VERIFIED` | Email не подтверждён | `{"error": {"code": "EMAIL_NOT_VERIFIED", "message": "..."}}` |
+| Код | Описание |
+|-----|----------|
+| `401 ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа |
+| `403 EMAIL_NOT_VERIFIED` | Email не подтверждён |
+
+**Response 401 Unauthorized (ACCESS_TOKEN_INVALID):**
+
+```json
+{
+  "error": {
+    "code": "ACCESS_TOKEN_INVALID",
+    "message": "Неверный или истёкший токен доступа",
+    "details": {}
+  }
+}
+```
+
+**Response 403 Forbidden (EMAIL_NOT_VERIFIED):**
+
+```json
+{
+  "error": {
+    "code": "EMAIL_NOT_VERIFIED",
+    "message": "Пожалуйста, подтвердите ваш email перед удалением аккаунта",
+    "details": {}
+  }
+}
+```
 
 **Пример curl:**
 

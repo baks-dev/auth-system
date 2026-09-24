@@ -195,6 +195,9 @@ stateDiagram-v2
 
 ### Жизненный цикл refresh token
 
+**Описание жизненного цикла:**
+Жизненный цикл refresh token начинается с состояния Created при генерации токена на endpoints `/login` или `/verify`. Токен переходит в состояние Active после сохранения в базе данных и установки как HTTP-only cookie. В состоянии Active токен может быть использован для обновления access token — при этом происходит rotation: старый токен становится Revoked, новый создается как Active. Токен может быть переведен в состояние Revoked через вызов `/logout` (установка `revoked = TRUE` в БД) или автоматически при истечении срока жизни (7 дней). Revoked и Expired токены впоследствии удаляются из БД крон-задачей через несколько дней.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Created: /login, /verify
@@ -217,6 +220,9 @@ stateDiagram-v2
 ## 2.5 Использование HTTP-only cookie для refresh token
 
 **Архитектура хранения:**
+
+**Описание архитектуры хранения:**
+Схема демонстрирует преимущества использования HTTP-only cookie для хранения refresh token по сравнению с localStorage. В браузере доступны два варианта хранения: localStorage (уязвим к XSS-атакам) и HTTP-only cookie (защищён от XSS, так как недоступен через JavaScript). Серверная часть хранит хэш refresh token в PostgreSQL для проверки валидности и добавляет его в Redis Blacklist при отзыве. Атакующий может украсть токен из localStorage, но не из HTTP-only cookie.
 
 ```mermaid
 flowchart LR
@@ -258,6 +264,9 @@ res.cookie('refresh_token', refreshTokenValue, {
 ```
 
 ### Как работает flow:
+
+**Описание flow:**
+Flow работы refresh token начинается при входе пользователя: сервер генерирует токены и устанавливает HTTP-only cookie с refresh token. При последующих вызовах `/refresh` браузер автоматически отправляет cookie, сервер проверяет его валидность и выдаёт новые токены, обновляя cookie. Важно: для отправки cookie в запросах необходимо использовать `credentials: 'include'` в fetch API.
 
 ```mermaid
 sequenceDiagram
