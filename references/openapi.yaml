@@ -40,6 +40,48 @@ components:
               type: object
               additionalProperties: true
 
+    # Validation Error Response (400 VALIDATION_ERROR)
+    ValidationErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - details
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: Ошибка валидации данных
+            details:
+              type: object
+              required:
+                - fields
+              properties:
+                fields:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - field
+                      - code
+                    properties:
+                      field:
+                        type: string
+                        example: email
+                      code:
+                        type: string
+                        example: INVALID_FORMAT
+                      message:
+                        type: string
+                        example: Неверный формат email
+
     # Auth Schemas
     RegisterRequest:
       type: object
@@ -248,7 +290,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/ValidationErrorResponse'
         '409':
           description: Email already registered
           content:

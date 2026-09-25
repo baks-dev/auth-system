@@ -93,17 +93,24 @@
 
 ### 6.1 Коды ошибок
 
+Канонический список кодов — `04-api-reference.md`, раздел 4.0.
+
 | Код | Описание |
 |-----|----------|
-| `VALIDATION_ERROR` | Ошибка валидации |
-| `INVALID_EMAIL` | Неверный формат email |
-| `WEAK_PASSWORD` | Пароль короче 8 символов |
-| `EMAIL_TAKEN` | Email уже занят |
+| `VALIDATION_ERROR` | Ошибка валидации данных (коды полей — в `details.fields`) |
+| `EMAIL_ALREADY_REGISTERED` | Email уже зарегистрирован |
+| `EMAIL_NOT_CONFIRMED` | Email не подтверждён |
+| `EMAIL_ALREADY_CONFIRMED` | Email уже подтверждён |
+| `CONFIRMATION_TOKEN_INVALID` | Неверный или истёкший токен подтверждения |
 | `INVALID_CREDENTIALS` | Неверный email или пароль |
-| `EMAIL_NOT_VERIFIED` | Email не подтвержден |
-| `INVALID_TOKEN` | Неверный или истекший токен |
-| `TOKEN_REVOKED` | Токен заблокирован |
-| `ALREADY_VERIFIED` | Email уже подтвержден |
+| `ACCESS_TOKEN_INVALID` | Неверный или истёкший токен доступа |
+| `REFRESH_TOKEN_INVALID` | Неверный или истёкший токен обновления |
+| `INVALID_TOKEN` | Неверный токен (сброс пароля, отписка) |
+| `EXPIRED_TOKEN` | Токен сброса пароля истёк |
+| `TOKEN_REVOKED` | Токен отозван (чёрный список) |
+| `TOKEN_NOT_FOUND` | Токен не найден |
+| `USER_NOT_FOUND` | Пользователь не найден |
+| `WEAK_PASSWORD` | Пароль не соответствует требованиям |
 | `RATE_LIMITED` | Превышен лимит запросов |
 
 ### 6.2 HTTP статусы
@@ -115,17 +122,41 @@
 - `429 Too Many Requests` — rate limit
 
 ### 6.3 Формат ошибок
+
+Все ошибки используют единый конверт (см. `04-api-reference.md` §4.0 и `references/openapi.yaml` → `ErrorResponse`):
+
 ```json
 {
-  "errors": [
-    {
-      "field": "email",
-      "message": "Email already registered",
-      "code": "EMAIL_TAKEN"
-    }
-  ]
+  "error": {
+    "code": "EMAIL_ALREADY_REGISTERED",
+    "message": "Пользователь с этим email уже существует",
+    "details": {}
+  }
 }
 ```
+
+- `code` — стабильный машинный код (см. §6.1);
+- `message` — человекочитаемое описание на русском;
+- `details` — опциональный объект со структурированными данными.
+
+Ошибки валидации (`400 VALIDATION_ERROR`) содержат массив `details.fields`:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Ошибка валидации данных",
+    "details": {
+      "fields": [
+        { "field": "email", "code": "INVALID_FORMAT" },
+        { "field": "password", "code": "TOO_SHORT" }
+      ]
+    }
+  }
+}
+```
+
+Для `429 RATE_LIMITED` в `details` передаётся `retry_after` (в секундах).
 
 ## 7. Успешные критерии
 
@@ -141,8 +172,8 @@
 
 | Сценарий | Поведение |
 |----------|----------|
-| Регистрация с уже существующим email | 409 + `EMAIL_TAKEN` |
-| Попытка входа с неподтвержденным email | 401 + `EMAIL_NOT_VERIFIED` |
-| Использование уже использованного token | 409 + `ALREADY_VERIFIED` |
-| Истекший token подтверждения | 400 + `INVALID_TOKEN` |
-| Неверный refresh token | 401 + `INVALID_TOKEN` |
+| Регистрация с уже существующим email | 409 + `EMAIL_ALREADY_REGISTERED` |
+| Попытка входа с неподтвержденным email | 403 + `EMAIL_NOT_CONFIRMED` |
+| Использование уже использованного token | 409 + `EMAIL_ALREADY_CONFIRMED` |
+| Истекший token подтверждения | 400 + `CONFIRMATION_TOKEN_INVALID` |
+| Неверный refresh token | 401 + `REFRESH_TOKEN_INVALID` |

@@ -66,11 +66,12 @@ Authorization: Bearer <access_token>
 | `EMAIL_NOT_CONFIRMED` | Email не подтверждён | 403 |
 | `REFRESH_TOKEN_INVALID` | Неверный токен обновления | 401 |
 | `ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа | 401 |
-| `INVALID_TOKEN` | Неверный токен (общий) | 400 |
+| `INVALID_TOKEN` | Неверный токен (сброс пароля, отписка) | 400 |
+| `EXPIRED_TOKEN` | Токен сброса пароля истёк | 400 |
+| `TOKEN_REVOKED` | Токен отозван (чёрный список) | 401 |
 | `TOKEN_NOT_FOUND` | Токен не найден | 404 |
 | `USER_NOT_FOUND` | Пользователь не найден | 404 |
 | `WEAK_PASSWORD` | Новый пароль не соответствует требованиям | 400 |
-| `EMAIL_ALREADY_VERIFIED` | Email уже подтверждён | 409 |
 
 ---
 
@@ -179,11 +180,13 @@ sequenceDiagram
   "error": {
     "code": "VALIDATION_ERROR",
     "message": "Ошибка валидации данных",
-    "fields": [
-      { "field": "email", "code": "INVALID_FORMAT" },
-      { "field": "password", "code": "TOO_SHORT" },
-      { "field": "name", "code": "REQUIRED" }
-    ]
+    "details": {
+      "fields": [
+        { "field": "email", "code": "INVALID_FORMAT" },
+        { "field": "password", "code": "TOO_SHORT" },
+        { "field": "name", "code": "REQUIRED" }
+      ]
+    }
   }
 }
 ```
@@ -793,15 +796,15 @@ sequenceDiagram
 
 | Код | Описание |
 |-----|----------|
-| `409 EMAIL_ALREADY_VERIFIED` | Email уже подтверждён |
+| `409 EMAIL_ALREADY_CONFIRMED` | Email уже подтверждён |
 | `429 RATE_LIMITED` | Превышен лимит запросов |
 
-**Response 409 Conflict (EMAIL_ALREADY_VERIFIED):**
+**Response 409 Conflict (EMAIL_ALREADY_CONFIRMED):**
 
 ```json
 {
   "error": {
-    "code": "EMAIL_ALREADY_VERIFIED",
+    "code": "EMAIL_ALREADY_CONFIRMED",
     "message": "Email уже подтверждён",
     "details": {}
   }
@@ -1269,7 +1272,7 @@ curl -X PUT https://api.mystore.com/v1/auth/change-password \
 **Описание:** Удаление аккаунта текущего пользователя (GDPR compliance)
 
 **Описание схемы:**
-Схема показывает процесс полного удаления аккаунта пользователя (GDPR right to be forgotten). Клиент отправляет DELETE-запрос на `/v1/auth/me` с access token в header. API Gateway валидирует токен. Если токен валиден, Auth Service проверяет, подтверждён ли email (обязательное условие для удаления). Если email подтверждён, последовательно удаляются: refresh tokens, email verification tokens, reset password tokens, login attempts и сама запись пользователя из БД. Также очищаются все сессии пользователя в Redis. Если email не подтверждён, возвращается 403 EMAIL_NOT_VERIFIED.
+Схема показывает процесс полного удаления аккаунта пользователя (GDPR right to be forgotten). Клиент отправляет DELETE-запрос на `/v1/auth/me` с access token в header. API Gateway валидирует токен. Если токен валиден, Auth Service проверяет, подтверждён ли email (обязательное условие для удаления). Если email подтверждён, последовательно удаляются: refresh tokens, email verification tokens, reset password tokens, login attempts и сама запись пользователя из БД. Также очищаются все сессии пользователя в Redis. Если email не подтверждён, возвращается 403 EMAIL_NOT_CONFIRMED.
 
 **Схема:**
 ```mermaid
@@ -1294,7 +1297,7 @@ sequenceDiagram
             A->>R: DEL session:*
             G-->>C: 200 OK
         else Email not verified
-            G-->>C: 403 EMAIL_NOT_VERIFIED
+            G-->>C: 403 EMAIL_NOT_CONFIRMED
         end
     else Token invalid
         G-->>C: 401 Unauthorized
@@ -1320,7 +1323,7 @@ Authorization: Bearer <access_token>
 | Код | Описание |
 |-----|----------|
 | `401 ACCESS_TOKEN_INVALID` | Неверный или истекший токен доступа |
-| `403 EMAIL_NOT_VERIFIED` | Email не подтверждён |
+| `403 EMAIL_NOT_CONFIRMED` | Email не подтверждён |
 
 **Response 401 Unauthorized (ACCESS_TOKEN_INVALID):**
 
@@ -1334,12 +1337,12 @@ Authorization: Bearer <access_token>
 }
 ```
 
-**Response 403 Forbidden (EMAIL_NOT_VERIFIED):**
+**Response 403 Forbidden (EMAIL_NOT_CONFIRMED):**
 
 ```json
 {
   "error": {
-    "code": "EMAIL_NOT_VERIFIED",
+    "code": "EMAIL_NOT_CONFIRMED",
     "message": "Пожалуйста, подтвердите ваш email перед удалением аккаунта",
     "details": {}
   }
