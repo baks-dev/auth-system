@@ -35,8 +35,9 @@ erDiagram
 
     REFRESH_TOKENS {
         uuid id PK
+        uuid jti UK
         uuid user_id FK
-        varchar(512) token_hash UK
+        varchar(512) token UK
         varchar(45) ip_address
         varchar(64) user_agent_hash
         boolean revoked
@@ -183,22 +184,24 @@ RETURNING id;
 
 | Поле            | Тип          | Описание                                                                     |
 | --------------- | ------------ | ---------------------------------------------------------------------------- |
-| id              | UUID         | **PRIMARY KEY**                                                              |
+| id              | UUID         | **PRIMARY KEY** (UUIDv4, внутренний идентификатор)                          |
+| jti             | UUID         | **UNIQUE** (UUIDv7, JWT ID для revocation и поиска)                         |
 | user_id         | UUID         | **FOREIGN KEY** → users(id) CASCADE                                          |
-| token           | VARCHAR(512) | UNIQUE, NOT NULL (SHA-256 хэш)                                               |
+| token           | VARCHAR(512) | UNIQUE, NOT NULL (SHA-256 хэш от оригинального токена)                      |
 | ip_address      | VARCHAR(45)  | NOT NULL (IP при выдаче токена, IPv4 или IPv6)                             |
 | user_agent_hash | VARCHAR(64)  | NOT NULL (SHA-256 хэш от агрегированной информации user_agent)              |
 | revoked         | BOOLEAN      | DEFAULT false                                                                |
 | revoked_at      | TIMESTAMP    | NULL                                                                         |
-| expires_at      | TIMESTAMP    | NOT NULL                                                                     |
+| expires_at      | TIMESTAMP    | NOT NULL (7 дней от создания)                                                |
 | parent_token_id | UUID         | **FOREIGN KEY** → refresh_tokens(id) NULL (для отслеживания rotation)       |
 | created_at      | TIMESTAMP    | DEFAULT NOW()                                                                |
 
 **Описание полей:**
 
-- `id` — уникальный идентификатор токена (UUIDv7)
+- `id` — внутренний первичный ключ (UUIDv4, генерируется `gen_random_uuid()`)
+- `jti` — JWT ID (UUIDv7), уникален для каждого токена, используется для revocation и поиска в БД
 - `user_id` — ссылка на пользователя, каскадное удаление (CASCADE)
-- `token` — SHA-256 хэш от refresh token (оригинал хранится в HTTP-only cookie)
+- `token` — SHA-256 хэш от оригинального токена (хранится в HTTP-only cookie)
 - `ip_address` — IP-адрес (IPv4 или IPv6) при выдаче токена (для аудита)
 - `user_agent_hash` — SHA-256 хэш от агрегированной информации user_agent (browser/os/device)
 - `revoked` — флаг инвалидации (true после logout или компрометации)
@@ -209,20 +212,22 @@ RETURNING id;
 
 **Индексы:**
 
-| Имя индекса                      | Поле               | Назначение                               |
-| -------------------------------- | ------------------ | ---------------------------------------- |
-| `idx_refresh_token`              | token              | Быстрый поиск по хэшу                    |
-| `idx_refresh_user_id`            | user_id            | Поиск активных токенов                   |
-| `idx_refresh_expires_at`         | expires_at         | Очистка истекших токенов                 |
-| `idx_refresh_ip`                 | ip_address         | Аудит по IP                              |
-| `idx_refresh_user_agent_hash`    | user_agent_hash    | Аудит по типам устройств                 |
-| `idx_refresh_parent_token_id`    | parent_token_id    | Отслеживание цепочек ротации             |
+| Имя индекса                          | Поле               | Назначение                               |
+| ------------------------------------ | ------------------ | ---------------------------------------- |
+| `idx_refresh_tokens_jti`             | jti                | Поиск токена по JWT ID (revocation)       |
+| `idx_refresh_tokens_token`           | token              | Быстрый поиск по хэшу                    |
+| `idx_refresh_tokens_user_id`         | user_id            | Поиск активных токенов                   |
+| `idx_refresh_tokens_expires_at`      | expires_at         | Очистка истекших токенов                 |
+| `idx_refresh_tokens_ip`              | ip_address         | Аудит по IP                              |
+| `idx_refresh_tokens_user_agent_hash` | user_agent_hash    | Аудит по типам устройств                 |
+| `idx_refresh_tokens_parent_token_id` | parent_token_id    | Отслеживание цепочек ротации             |
 
 **SQL: Создание таблицы**
 
 ```sql
 CREATE TABLE refresh_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    jti UUID NOT NULL UNIQUE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token VARCHAR(512) NOT NULL UNIQUE,
     ip_address VARCHAR(45) NOT NULL,
@@ -234,18 +239,19 @@ CREATE TABLE refresh_tokens (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_refresh_token ON refresh_tokens (token);
-CREATE INDEX idx_refresh_user_id ON refresh_tokens (user_id);
-CREATE INDEX idx_refresh_expires_at ON refresh_tokens (expires_at);
-CREATE INDEX idx_refresh_ip ON refresh_tokens (ip_address);
-CREATE INDEX idx_refresh_user_agent_hash ON refresh_tokens (user_agent_hash);
-CREATE INDEX idx_refresh_parent_token_id ON refresh_tokens (parent_token_id);
+CREATE INDEX idx_refresh_tokens_jti ON refresh_tokens (jti);
+CREATE INDEX idx_refresh_tokens_token ON refresh_tokens (token);
+CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens (user_id);
+CREATE INDEX idx_refresh_tokens_expires_at ON refresh_tokens (expires_at);
+CREATE INDEX idx_refresh_tokens_ip ON refresh_tokens (ip_address);
+CREATE INDEX idx_refresh_tokens_user_agent_hash ON refresh_tokens (user_agent_hash);
+CREATE INDEX idx_refresh_tokens_parent_token_id ON refresh_tokens (parent_token_id);
 ```
 
 **Revocation Flow (с token binding):**
 
-1. При logout: `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE id = ? AND user_id = ?`
-2. При проверке refresh: `WHERE id = ? AND revoked = FALSE AND expires_at > NOW() AND ip_address = ? AND user_agent_hash = ?`
+1. При logout: `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW() WHERE jti = ? AND user_id = ?`
+2. При проверке refresh: `WHERE jti = ? AND revoked = FALSE AND expires_at > NOW() AND ip_address = ? AND user_agent_hash = ?`
 3. **Token rotation:** при каждом refresh:
    - Генерируется новый токен с `parent_token_id = old_token_id`
    - Старый токен помечается как `revoked = TRUE`

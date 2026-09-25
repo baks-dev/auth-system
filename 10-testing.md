@@ -32,7 +32,7 @@
 | Сценарий | Вход | Ожидаемый результат |
 |----------|------|---------------------|
 | Валидный JWT | Токен с валидной подписью | `isValid = true` |
-| Истекший JWT | Токен с прошедшим `exp` | `isValid = false`, ошибка `TOKEN_EXPIRED` |
+| Истекший JWT | Токен с прошедшим `exp` | `isValid = false`, ошибка `ACCESS_TOKEN_INVALID` |
 | Неверный issuer | `iss` не равен `mystore-auth-service` | `isValid = false`, ошибка `ACCESS_TOKEN_INVALID` |
 | Revoked token | `jti` в blacklist Redis | `isValid = false`, ошибка `TOKEN_REVOKED` |
 | Правильный пароль | `argon2id` хеш совпадает | `isValid = true` |
